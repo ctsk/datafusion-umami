@@ -32,12 +32,12 @@ use super::{
     utils::{OnceAsync, OnceFut},
     PartitionMode, SharedBitmapBuilder,
 };
+use crate::buffer::memory_buffer::MemoryBuffer;
 use crate::execution_plan::{boundedness_from_children, EmissionType};
 use crate::projection::{
     try_embed_projection, try_pushdown_through_join, EmbeddedProjection, JoinData,
     ProjectionExec,
 };
-use crate::spill::get_record_batch_memory_size;
 use crate::ExecutionPlanProperties;
 use crate::{
     coalesce_partitions::CoalescePartitionsExec,
@@ -82,7 +82,7 @@ use datafusion_physical_expr::PhysicalExprRef;
 use datafusion_physical_expr_common::datum::compare_op_for_nested;
 
 use ahash::RandomState;
-use futures::{ready, Stream, StreamExt, TryStreamExt};
+use futures::{ready, Stream, StreamExt};
 use parking_lot::Mutex;
 
 /// HashTable and input data for the left (build side) of a join
@@ -925,7 +925,7 @@ async fn collect_left_input(
     on_left: Vec<PhysicalExprRef>,
     context: Arc<TaskContext>,
     metrics: BuildProbeJoinMetrics,
-    reservation: MemoryReservation,
+    mut reservation: MemoryReservation,
     with_visited_indices_bitmap: bool,
     probe_threads_count: usize,
 ) -> Result<JoinLeftData> {
@@ -940,44 +940,53 @@ async fn collect_left_input(
     };
 
     // Depending on partition argument load single partition or whole left side in memory
-    let stream = left_input.execute(left_input_partition, Arc::clone(&context))?;
+    let mut stream = left_input.execute(left_input_partition, Arc::clone(&context))?;
 
     // This operation performs 2 steps at once:
     // 1. creates a [JoinHashMap] of all batches from the stream
     // 2. stores the batches in a vector.
-    let initial = (Vec::new(), 0, metrics, reservation);
-    let (batches, num_rows, metrics, mut reservation) = stream
-        .try_fold(initial, |mut acc, batch| async {
-            let batch_size = get_record_batch_memory_size(&batch);
-            // Reserve memory for incoming batch
-            acc.3.try_grow(batch_size)?;
-            // Update metrics
-            acc.2.build_mem_used.add(batch_size);
-            acc.2.build_input_batches.add(1);
-            acc.2.build_input_rows.add(batch.num_rows());
-            // Update row count
-            acc.1 += batch.num_rows();
-            // Push batch to output
-            acc.0.push(batch);
-            Ok(acc)
-        })
-        .await?;
+    let mut memory_buffer = MemoryBuffer::new(reservation.new_empty());
+    while let Some(batch) = stream.next().await {
+        memory_buffer.push(batch?)?;
+    }
+
+    // let initial = (Vec::new(), 0, metrics, reservation);
+    // let (batches, num_rows, metrics, mut reservation) = stream
+    //     .try_fold(initial, |mut acc, batch| async {
+    //         let batch_size = batch.get_array_memory_size();
+    //         // Reserve memory for incoming batch
+    //         acc.3.try_grow(batch_size)?;
+    //         // Update metrics
+    //         acc.2.build_mem_used.add(batch_size);
+    //         acc.2.build_input_batches.add(1);
+    //         acc.2.build_input_rows.add(batch.num_rows());
+    //         // Update row count
+    //         acc.1 += batch.num_rows();
+    //         // Push batch to output
+    //         acc.0.push(batch);
+    //         Ok(acc)
+    //     })
+    //     .await?;
+
+    metrics.build_mem_used.add(memory_buffer.mem_used());
+    metrics.build_input_batches.add(memory_buffer.num_batches());
+    metrics.build_input_rows.add(memory_buffer.num_rows());
 
     // Estimation of memory size, required for hashtable, prior to allocation.
     // Final result can be verified using `RawTable.allocation_info()`
     let fixed_size = size_of::<JoinHashMap>();
     let estimated_hashtable_size =
-        estimate_memory_size::<(u64, u64)>(num_rows, fixed_size)?;
+        estimate_memory_size::<(u64, u64)>(memory_buffer.num_rows(), fixed_size)?;
 
     reservation.try_grow(estimated_hashtable_size)?;
     metrics.build_mem_used.add(estimated_hashtable_size);
 
-    let mut hashmap = JoinHashMap::with_capacity(num_rows);
+    let mut hashmap = JoinHashMap::with_capacity(memory_buffer.num_rows());
     let mut hashes_buffer = Vec::new();
     let mut offset = 0;
 
     // Updating hashmap starting from the last batch
-    let batches_iter = batches.iter().rev();
+    let batches_iter = memory_buffer.iter().rev();
     for batch in batches_iter.clone() {
         hashes_buffer.clear();
         hashes_buffer.resize(batch.num_rows(), 0);
@@ -1003,7 +1012,7 @@ async fn collect_left_input(
         metrics.build_mem_used.add(bitmap_size);
 
         let mut bitmap_buffer = BooleanBufferBuilder::new(single_batch.num_rows());
-        bitmap_buffer.append_n(num_rows, false);
+        bitmap_buffer.append_n(memory_buffer.num_rows(), false);
         bitmap_buffer
     } else {
         BooleanBufferBuilder::new(0)
