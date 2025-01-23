@@ -1,0 +1,379 @@
+use std::{path::PathBuf, sync::Arc};
+
+use crate::{
+    common::IPCWriter,
+    metrics,
+    repartition::BatchPartitioner,
+};
+use arrow_array::RecordBatch;
+use arrow_schema::{Schema, SchemaRef};
+use datafusion_common::error::Result;
+use datafusion_execution::{runtime_env::RuntimeEnv, SendableRecordBatchStream};
+use datafusion_physical_expr::{Partitioning, PhysicalExprRef};
+use futures::StreamExt;
+
+//
+//  TRANSITIONS
+//    STANDARD
+//       \   Number of bytes? tuples? Greater than threshold
+//       \
+//       v
+//   PARTITION
+//       \   Number of bytes? tuples? in memory
+//       \
+//       v
+//     SPILL
+
+const SPILL_ID: &'static str = "umami";
+
+#[derive(Debug)]
+struct AdaptiveBufferOptions {
+    page_grow_factor: usize,
+    partition_value: usize,
+    partition_threshold: usize,
+    spill_threshold: usize,
+}
+
+impl Default for AdaptiveBufferOptions {
+    fn default() -> Self {
+        Self {
+            page_grow_factor: 2,
+            partition_value: 256,
+            partition_threshold: 1 << 17,
+            spill_threshold: 1 << 20,
+        }
+    }
+}
+
+enum PartitionState {
+    InMemory { batches: Vec<RecordBatch> },
+    Spilling { writer: IPCWriter },
+}
+
+impl PartialEq for PartitionState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InMemory { batches: l_batches }, Self::InMemory { batches: r_batches }) => l_batches == r_batches,
+            _ => false,
+        }
+    }
+}
+
+impl Default for PartitionState {
+    fn default() -> Self {
+        Self::InMemory { batches: vec![] }
+    }
+}
+
+impl std::fmt::Debug for PartitionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PartitionState::InMemory { batches } => {
+                write!(f, "InMemory({:?})", batches)
+            }
+            PartitionState::Spilling { writer } => {
+                write!(f, "Spilling({})", writer.path.display())
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Partition {
+    id: usize,
+    metrics: PartitionMetrics,
+    spilled_metrics: PartitionMetrics,
+    state: PartitionState,
+}
+
+impl Partition {
+    fn new(id: usize) -> Self {
+        Self {
+            id,
+            metrics: Default::default(),
+            spilled_metrics: Default::default(),
+            state: Default::default(),
+        }
+    }
+
+    fn spilled(&self) -> bool {
+        match &self.state {
+            PartitionState::InMemory { batches } => false,
+            PartitionState::Spilling { writer } => true,
+        }
+    }
+
+    fn spill(&mut self, schema: &Schema) -> Result<()> {
+        match &self.state {
+            PartitionState::InMemory { batches } => {
+                self.metrics = Default::default();
+                let pathbuf = PathBuf::from(format!("{}_{}", SPILL_ID, self.id));
+                let mut writer = IPCWriter::new(
+                    &pathbuf,
+                    schema,
+                )?;
+
+                for batch in batches {
+                    self.spilled_metrics.update(&batch);
+                    writer.write(&batch)?;
+                }
+
+                self.state = PartitionState::Spilling {
+                    writer
+                };
+
+                Ok(())
+            },
+            PartitionState::Spilling { writer } => {
+                panic!("Can not spill a spilled partition");
+            }
+        }
+    }
+
+    fn push(&mut self, batch: RecordBatch) -> Result<()> {
+        match &mut self.state {
+            PartitionState::InMemory { batches } => {
+                self.metrics.update(&batch);
+                batches.push(batch);
+                Ok(())
+            }
+            PartitionState::Spilling { writer } => {
+                self.spilled_metrics.update(&batch);
+                writer.write(&batch)
+            }
+        }
+    }
+}
+
+#[derive(Default, Debug, PartialEq)]
+struct PartitionMetrics {
+    num_batches: metrics::Gauge,
+    num_rows: metrics::Gauge,
+    mem_used: metrics::Gauge,
+}
+
+impl PartitionMetrics {
+    fn update(&mut self, batch: &RecordBatch) {
+        self.num_batches.add(1);
+        self.num_rows.add(batch.num_rows());
+        self.mem_used.add(batch.get_array_memory_size());
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum State {
+    Standard {
+        batches: Vec<RecordBatch>,
+    },
+    Partitioned {
+        unpartitioned: Vec<RecordBatch>,
+        partitions: Vec<Partition>,
+    },
+}
+
+struct AdaptiveBuffer {
+    options: AdaptiveBufferOptions,
+    partitioner: BatchPartitioner,
+    runtime: Arc<RuntimeEnv>,
+    schema: SchemaRef,
+    
+    state: State,
+    totals: PartitionMetrics,
+    totals_spilled: PartitionMetrics,
+}
+
+impl std::fmt::Debug for AdaptiveBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AdaptiveBuffer(
+        options={:?},
+        state={:?},
+        totals={:?},
+        totals_spilled={:?}
+)",
+            self.options,
+            self.state,
+            self.totals,
+            self.totals_spilled,
+
+        )
+    }
+}
+
+impl AdaptiveBuffer {
+    pub(crate) fn try_new(
+        expr: Vec<PhysicalExprRef>,
+        runtime: Arc<RuntimeEnv>,
+        schema: SchemaRef,
+        options: Option<AdaptiveBufferOptions>,
+    ) -> Result<Self> {
+        let options = options.unwrap_or_default();
+
+        let partitioner = BatchPartitioner::try_new(
+            Partitioning::Hash(expr, options.partition_value),
+            metrics::Time::new(),
+        )?;
+
+        Ok(Self {
+            options,
+            state: State::Standard {
+                batches: vec![],
+            },
+            partitioner,
+            runtime,
+            schema,
+            totals: PartitionMetrics::default(),
+            totals_spilled: PartitionMetrics::default(),
+        })
+    }
+    pub(crate) async fn buffer(
+        &mut self,
+        mut stream: SendableRecordBatchStream,
+    ) -> Result<()> {
+        while let Some(batch) = stream.next().await {
+            self.push(batch?)?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn push(&mut self, batch: RecordBatch) -> Result<()> {
+        match &mut self.state {
+            State::Standard { batches } => Ok(Self::standard_push(&mut self.totals, batches, batch)),
+            State::Partitioned {
+                unpartitioned: _,
+                partitions,
+            } => Self::partition_push(&mut self.totals, &mut self.totals_spilled, &mut self.partitioner, partitions, batch),
+        }?;
+
+        self.update_state()
+    }
+
+    fn standard_push(metrics: &mut PartitionMetrics, batches: &mut Vec<RecordBatch>, batch: RecordBatch) {
+        metrics.update(&batch);
+        batches.push(batch);
+    }
+
+    fn partition_push(
+        metrics: &mut PartitionMetrics,
+        metrics_spilled: &mut PartitionMetrics,
+        partitioner: &mut BatchPartitioner,
+        partitions: &mut Vec<Partition>,
+        batch: RecordBatch,
+    ) -> Result<()> {
+        for item in partitioner.partition_iter(batch)? {
+            let (partition, batch) = item?;
+            let partition = &mut partitions[partition];
+
+            if partition.spilled() {
+                metrics_spilled.update(&batch);
+            } else {
+                metrics.update(&batch);
+            }
+
+            partition.push(batch)?;
+        }
+
+        Ok(())
+    }
+
+    fn update_state(&mut self) -> Result<()> {
+        match &mut self.state {
+            State::Standard { batches } => {
+                if self.totals.num_rows.value() > self.options.spill_threshold {
+                    panic!(
+                        "We reached the spill threshold before partitioning. -- Can not recover."
+                    )
+                }
+                if self.totals.num_rows.value() > self.options.partition_threshold {
+                    self.state = State::Partitioned {
+                        unpartitioned: std::mem::take(batches),
+                        partitions: (0..self.options.partition_value).map(|id| Partition::new(id)).collect()
+                    }
+                }
+            }
+            State::Partitioned {
+                unpartitioned:_,
+                partitions,
+            } => {
+                while self.totals.num_rows.value() > self.options.spill_threshold {
+                    // select the partition with the most rows
+                    let partition = partitions.iter_mut().max_by_key(
+                        |partition| partition.metrics.num_rows.value(),
+                    ).unwrap();
+
+
+                    self.totals.mem_used.sub(partition.metrics.mem_used.value());
+                    self.totals.num_batches.sub(partition.metrics.num_batches.value());
+                    self.totals.num_rows.sub(partition.metrics.num_rows.value());
+
+                    self.totals_spilled.mem_used.add(partition.metrics.mem_used.value());
+                    self.totals_spilled.num_batches.add(partition.metrics.num_batches.value());
+                    self.totals_spilled.num_rows.add(partition.metrics.num_rows.value());
+
+                    partition.spill(&self.schema)?
+                }
+            },
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::{Int32Array, Int64Array};
+    use arrow_schema::{DataType, Field};
+    use datafusion_execution::runtime_env::RuntimeEnvBuilder;
+    use datafusion_physical_expr::expressions::col;
+    
+
+    use super::*;
+
+    #[test]
+    fn test_unpartitioned() -> Result<()> {
+        
+        let schema = Arc::new(Schema::new(
+            vec![
+                Field::new("a", DataType::Int32, false),
+                Field::new("b", DataType::Int64, false),
+            ]
+        ));
+
+        let col_a = Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+        let col_b = Arc::new(Int64Array::from(vec![10, 9,  8, 7, 6, 5, 4, 3, 2, 1]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![col_a, col_b])?;
+        
+        let options = AdaptiveBufferOptions {
+            partition_threshold: 3,
+            spill_threshold: 100,
+            partition_value: 3,
+            page_grow_factor: 2,
+        };
+
+        let runtime_env = RuntimeEnvBuilder::default().build_arc()?;
+
+        let mut buffer = AdaptiveBuffer::try_new(
+            vec![col("a", &schema)?],
+            runtime_env,
+            schema,
+            Some(options),
+        )?;
+
+
+        let expected = [4, 20, 1008];
+
+        buffer.push(batch.clone())?; // pushed unified
+        println!("{:?}", buffer);
+        buffer.push(batch.clone())?; // pushed 
+        println!("{:?}", buffer);
+
+
+        assert_eq!([
+            buffer.totals.num_batches.value(),
+            buffer.totals.num_rows.value(),
+            buffer.totals.mem_used.value(),
+        ], expected);
+
+        Ok(())
+    }
+}
