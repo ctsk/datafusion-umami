@@ -5,11 +5,12 @@ use datafusion_common::error::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 
 use crate::metrics;
+
+use super::{MaterializedBatches, PartitionMetrics};
 pub(crate) struct MemoryBuffer {
     batches: Vec<RecordBatch>,
     reservation: MemoryReservation,
-    mem_used: metrics::Gauge,
-    num_rows: metrics::Gauge,
+    metrics: PartitionMetrics,
 }
 
 impl MemoryBuffer {
@@ -17,8 +18,7 @@ impl MemoryBuffer {
         MemoryBuffer {
             batches: Vec::new(),
             reservation,
-            mem_used: Default::default(),
-            num_rows: Default::default(),
+            metrics: Default::default(),
         }
     }
 
@@ -26,26 +26,13 @@ impl MemoryBuffer {
         let mem_size = batch.get_array_memory_size();
 
         self.reservation.try_grow(mem_size)?;
-        self.num_rows.add(batch.num_rows());
-        self.mem_used.add(mem_size);
+        self.metrics.update(&batch);
         self.batches.push(batch);
 
         Ok(())
     }
 
-    pub(crate) fn num_rows(&self) -> usize {
-        self.num_rows.value()
-    }
-
-    pub(crate) fn mem_used(&self) -> usize {
-        self.mem_used.value()
-    }
-
-    pub(crate) fn num_batches(&self) -> usize {
-        self.batches.len()
-    }
-
-    pub(crate) fn iter(&self) -> Iter<RecordBatch> {
-        self.batches.iter()
+    pub(crate) fn finalize(self) -> MaterializedBatches {
+        MaterializedBatches::from_unpartitioned(self.batches, self.metrics)
     }
 }

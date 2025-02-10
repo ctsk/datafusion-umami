@@ -949,6 +949,7 @@ async fn collect_left_input(
     while let Some(batch) = stream.next().await {
         memory_buffer.push(batch?)?;
     }
+    let mut batches = memory_buffer.finalize();
 
     // let initial = (Vec::new(), 0, metrics, reservation);
     // let (batches, num_rows, metrics, mut reservation) = stream
@@ -968,25 +969,26 @@ async fn collect_left_input(
     //     })
     //     .await?;
 
-    metrics.build_mem_used.add(memory_buffer.mem_used());
-    metrics.build_input_batches.add(memory_buffer.num_batches());
-    metrics.build_input_rows.add(memory_buffer.num_rows());
+    metrics.build_mem_used.add(batches.mem_used());
+    metrics.build_input_batches.add(batches.num_batches());
+    metrics.build_input_rows.add(batches.num_rows());
 
     // Estimation of memory size, required for hashtable, prior to allocation.
     // Final result can be verified using `RawTable.allocation_info()`
     let fixed_size = size_of::<JoinHashMap>();
     let estimated_hashtable_size =
-        estimate_memory_size::<(u64, u64)>(memory_buffer.num_rows(), fixed_size)?;
+        estimate_memory_size::<(u64, u64)>(batches.num_rows(), fixed_size)?;
 
     reservation.try_grow(estimated_hashtable_size)?;
     metrics.build_mem_used.add(estimated_hashtable_size);
 
-    let mut hashmap = JoinHashMap::with_capacity(memory_buffer.num_rows());
+    let mut hashmap = JoinHashMap::with_capacity(batches.num_rows());
     let mut hashes_buffer = Vec::new();
     let mut offset = 0;
 
     // Updating hashmap starting from the last batch
-    let batches_iter = memory_buffer.iter().rev();
+    let batches = batches.take_mem_batches();
+    let batches_iter = batches.iter().rev();
     for batch in batches_iter.clone() {
         hashes_buffer.clear();
         hashes_buffer.resize(batch.num_rows(), 0);
@@ -1012,7 +1014,7 @@ async fn collect_left_input(
         metrics.build_mem_used.add(bitmap_size);
 
         let mut bitmap_buffer = BooleanBufferBuilder::new(single_batch.num_rows());
-        bitmap_buffer.append_n(memory_buffer.num_rows(), false);
+        bitmap_buffer.append_n(metrics.build_input_rows.value(), false);
         bitmap_buffer
     } else {
         BooleanBufferBuilder::new(0)
