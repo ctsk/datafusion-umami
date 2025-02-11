@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{common::IPCWriter, metrics, repartition::BatchPartitioner};
-use arrow_array::RecordBatch;
+use arrow::array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
 use datafusion_common::error::Result;
 use datafusion_execution::{
@@ -285,6 +285,7 @@ impl AdaptiveBuffer {
     pub(crate) fn finalize(mut self) -> Result<MaterializedBatches> {
         match self.state {
             State::Standard { batches } => Ok(MaterializedBatches::from_unpartitioned(
+                self.schema,
                 batches,
                 self.totals,
             )),
@@ -307,6 +308,7 @@ impl AdaptiveBuffer {
                     }
 
                     Ok(MaterializedBatches::from_partitioned(
+                        self.schema,
                         partitions
                             .into_iter()
                             .map(|part| part.finalize())
@@ -316,6 +318,7 @@ impl AdaptiveBuffer {
                     ))
                 } else {
                     Ok(MaterializedBatches::from_partially_partitioned(
+                        self.schema,
                         unpartitioned,
                         partitions
                             .into_iter()

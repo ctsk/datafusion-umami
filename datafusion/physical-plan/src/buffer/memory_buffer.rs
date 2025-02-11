@@ -1,21 +1,20 @@
-use std::slice::Iter;
-
 use arrow::array::RecordBatch;
+use arrow_schema::SchemaRef;
 use datafusion_common::error::Result;
 use datafusion_execution::memory_pool::MemoryReservation;
 
-use crate::metrics;
-
 use super::{MaterializedBatches, PartitionMetrics};
 pub(crate) struct MemoryBuffer {
+    schema: SchemaRef,
     batches: Vec<RecordBatch>,
     reservation: MemoryReservation,
     metrics: PartitionMetrics,
 }
 
 impl MemoryBuffer {
-    pub(crate) fn new(reservation: MemoryReservation) -> Self {
+    pub(crate) fn new(schema: SchemaRef, reservation: MemoryReservation) -> Self {
         MemoryBuffer {
+            schema,
             batches: Vec::new(),
             reservation,
             metrics: Default::default(),
@@ -33,6 +32,6 @@ impl MemoryBuffer {
     }
 
     pub(crate) fn finalize(self) -> MaterializedBatches {
-        MaterializedBatches::from_unpartitioned(self.batches, self.metrics)
+        MaterializedBatches::from_unpartitioned(self.schema, self.batches, self.metrics)
     }
 }
