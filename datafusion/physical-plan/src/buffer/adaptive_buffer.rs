@@ -201,7 +201,7 @@ enum State {
     },
 }
 
-struct AdaptiveBuffer {
+pub(crate) struct AdaptiveBuffer {
     options: AdaptiveBufferOptions,
     partitioner: BatchPartitioner,
     runtime: Arc<RuntimeEnv>,

@@ -32,6 +32,7 @@ use super::{
     utils::{OnceAsync, OnceFut},
     PartitionMode, SharedBitmapBuilder,
 };
+use crate::buffer::adaptive_buffer::{AdaptiveBuffer, AdaptiveBufferOptions};
 use crate::buffer::memory_buffer::MemoryBuffer;
 use crate::buffer::{MaterializedBatches, MaterializedPartition, PartitionMetrics};
 use crate::common::IPCWriter;
@@ -78,6 +79,7 @@ use datafusion_common::{
 };
 use datafusion_execution::disk_manager::RefCountedTempFile;
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_execution::TaskContext;
 use datafusion_expr::Operator;
 use datafusion_physical_expr::equivalence::{
@@ -799,6 +801,7 @@ impl ExecutionPlan for HashJoinExec {
                     reservation,
                     need_produce_result_in_final(self.join_type),
                     self.right().output_partitioning().partition_count(),
+                    context.runtime_env(),
                 )
             }),
             PartitionMode::Partitioned => {
@@ -816,6 +819,7 @@ impl ExecutionPlan for HashJoinExec {
                     reservation,
                     need_produce_result_in_final(self.join_type),
                     1,
+                    context.runtime_env(),
                 ))
             }
             PartitionMode::Auto => {
@@ -936,6 +940,7 @@ async fn collect_left_input(
     reservation: MemoryReservation,
     with_visited_indices_bitmap: bool,
     probe_threads_count: usize,
+    runtime: Arc<RuntimeEnv>,
 ) -> Result<RwLock<(JoinLeftData, MaterializedBatches)>> {
     let schema = left.schema();
 
@@ -953,11 +958,17 @@ async fn collect_left_input(
     // This operation performs 2 steps at once:
     // 1. creates a [JoinHashMap] of all batches from the stream
     // 2. stores the batches in a vector.
-    let mut memory_buffer = MemoryBuffer::new(schema.clone(), reservation.new_empty());
+    let mut memory_buffer = AdaptiveBuffer::try_new(
+        on_left.clone(),
+        runtime,
+        schema.clone(),
+        None
+    )?;
+
     while let Some(batch) = stream.next().await {
         memory_buffer.push(batch?)?;
     }
-    let mut batches = memory_buffer.finalize();
+    let mut batches = memory_buffer.finalize()?;
 
     metrics.build_mem_used.add(batches.mem_used());
     metrics.build_input_batches.add(batches.num_batches());
