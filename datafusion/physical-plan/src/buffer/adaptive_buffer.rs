@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use crate::{common::IPCWriter, metrics, repartition::BatchPartitioner};
 use arrow::array::RecordBatch;
@@ -26,12 +26,13 @@ use super::{MaterializedBatches, MaterializedPartition, PartitionMetrics};
 
 const SPILL_ID: &'static str = "umami";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct AdaptiveBufferOptions {
     page_grow_factor: usize,
     partition_value: usize,
     partition_threshold: usize,
     spill_threshold: usize,
+    start_partitioned: bool,
 }
 
 impl Default for AdaptiveBufferOptions {
@@ -39,9 +40,32 @@ impl Default for AdaptiveBufferOptions {
         Self {
             page_grow_factor: 2,
             partition_value: 256,
-            partition_threshold: 1 << 17,
+            partition_threshold: 0,
             spill_threshold: 1 << 20,
+            start_partitioned: false,
         }
+    }
+}
+
+impl AdaptiveBufferOptions {
+    pub(crate) fn with_partition_value(mut self, partition_value: usize) -> Self {
+        self.partition_value = partition_value;
+        self
+    }
+
+    pub(crate) fn with_partition_threshold(mut self, partition_threshold: usize) -> Self {
+        self.partition_threshold = partition_threshold;
+        self
+    }
+
+    pub(crate) fn with_spill_threshold(mut self, spill_threshold: usize) -> Self {
+        self.spill_threshold = spill_threshold;
+        self
+    }
+
+    pub(crate) fn with_start_partitioned(mut self, start_partitioned: bool) -> Self {
+        self.start_partitioned = true;
+        self
     }
 }
 
@@ -115,15 +139,14 @@ impl Partition {
         match &self.state {
             PartitionState::InMemory { batches } => {
                 self.metrics = Default::default();
-                let pathbuf = PathBuf::from(format!("{}_{}", SPILL_ID, self.id));
-                let mut writer = IPCWriter::new(&pathbuf, schema)?;
+                let spill_file = runtime.disk_manager.create_tmp_file(&SPILL_ID)?;
+                let mut writer = IPCWriter::new(spill_file.path(), schema)?;
 
                 for batch in batches {
                     self.spilled_metrics.update(&batch);
                     writer.write(&batch)?;
                 }
 
-                let spill_file = runtime.disk_manager.create_tmp_file(&SPILL_ID)?;
                 self.state = PartitionState::Spilling {
                     writer,
                     file: spill_file,
@@ -241,9 +264,10 @@ impl AdaptiveBuffer {
             metrics::Time::new(),
         )?;
 
+        let state = Self::init_state(&options);
         Ok(Self {
             options,
-            state: State::Standard { batches: vec![] },
+            state,
             partitioner,
             runtime,
             schema,
@@ -251,6 +275,20 @@ impl AdaptiveBuffer {
             totals_spilled: PartitionMetrics::default(),
         })
     }
+
+    fn init_state(abo: &AdaptiveBufferOptions) -> State {
+        if abo.start_partitioned {
+            State::Partitioned {
+                unpartitioned: vec![],
+                partitions: (0..abo.partition_value)
+                    .map(|id| Partition::new(id))
+                    .collect(),
+            }
+        } else {
+            State::Standard { batches: vec![] }
+        }
+    }
+
     pub(crate) async fn buffer(
         &mut self,
         mut stream: SendableRecordBatchStream,
@@ -442,6 +480,7 @@ mod tests {
             spill_threshold: 100,
             partition_value: 3,
             page_grow_factor: 2,
+            start_partitioned: false,
         };
 
         let runtime_env = RuntimeEnvBuilder::default().build_arc()?;
