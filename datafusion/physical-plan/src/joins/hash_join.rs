@@ -521,8 +521,9 @@ impl HashJoinExec {
         )
     }
 
-    pub(crate) fn set_adaptive_options(&mut self, opts: AdaptiveBufferOptions) {
+    pub fn with_adaptive_options(mut self, opts: AdaptiveBufferOptions) -> Self {
         self.adaptive_options = Some(opts);
+        self
     }
 
     /// This function creates the cache object that stores the plan properties such as schema, equivalence properties, ordering, partitioning, etc.
@@ -1275,7 +1276,7 @@ struct ProbeBatchPartitioner {
 impl ProbeBatchPartitioner {
     fn try_new(
         expr: Vec<PhysicalExprRef>,
-        random_state: RandomState,
+        _random_state: RandomState,
         schema: SchemaRef,
         mask: Vec<bool>,
         runtime: &RuntimeEnv,
@@ -1962,10 +1963,10 @@ mod tests {
             null_equals_null,
         )?;
 
-        exec.set_adaptive_options(AdaptiveBufferOptions::default()
-            .with_partition_value(4)
-            .with_partition_threshold(0)
-            .with_start_partitioned(true)
+        exec = exec.with_adaptive_options(AdaptiveBufferOptions::default()
+            .with_spill_threshold(usize::MAX)
+            .with_partition_threshold(1 << 16)
+            .with_start_partitioned(false)
         );
 
         Ok(exec)
@@ -1990,10 +1991,10 @@ mod tests {
             null_equals_null,
         )?;
 
-        exec.set_adaptive_options(AdaptiveBufferOptions::default()
-            .with_partition_value(4)
-            .with_partition_threshold(0)
-            .with_start_partitioned(true)
+        exec = exec.with_adaptive_options(AdaptiveBufferOptions::default()
+            .with_spill_threshold(usize::MAX)
+            .with_partition_threshold(1 << 16)
+            .with_start_partitioned(false)
         );
 
         Ok(exec)
@@ -4524,7 +4525,7 @@ mod tests {
 
         let mut join = join(left, right, on, &JoinType::Inner, false)?;
 
-        join.set_adaptive_options(
+        join = join.with_adaptive_options(
             AdaptiveBufferOptions::default()
                 .with_partition_value(4) // 4 partitions
                 .with_partition_threshold(2) // Batch 2 will be partitioned
@@ -4552,10 +4553,5 @@ mod tests {
         assert_batches_eq!(expected, &batches);
 
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn tpch_region_nation() -> Result<()> {
-
     }
 }

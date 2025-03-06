@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, usize};
 
 use crate::{common::IPCWriter, metrics, repartition::BatchPartitioner};
 use arrow::array::RecordBatch;
@@ -27,8 +27,8 @@ use super::{MaterializedBatches, MaterializedPartition, PartitionMetrics};
 const SPILL_ID: &'static str = "umami";
 
 #[derive(Clone, Debug)]
-pub(crate) struct AdaptiveBufferOptions {
-    page_grow_factor: usize,
+pub struct AdaptiveBufferOptions {
+    _page_grow_factor: usize,
     partition_value: usize,
     partition_threshold: usize,
     spill_threshold: usize,
@@ -38,7 +38,7 @@ pub(crate) struct AdaptiveBufferOptions {
 impl Default for AdaptiveBufferOptions {
     fn default() -> Self {
         Self {
-            page_grow_factor: 2,
+            _page_grow_factor: 2,
             partition_value: 256,
             partition_threshold: 0,
             spill_threshold: 1 << 20,
@@ -48,24 +48,40 @@ impl Default for AdaptiveBufferOptions {
 }
 
 impl AdaptiveBufferOptions {
-    pub(crate) fn with_partition_value(mut self, partition_value: usize) -> Self {
+    pub fn with_partition_value(mut self, partition_value: usize) -> Self {
         self.partition_value = partition_value;
         self
     }
 
-    pub(crate) fn with_partition_threshold(mut self, partition_threshold: usize) -> Self {
+    pub fn with_partition_threshold(mut self, partition_threshold: usize) -> Self {
         self.partition_threshold = partition_threshold;
         self
     }
 
-    pub(crate) fn with_spill_threshold(mut self, spill_threshold: usize) -> Self {
+    pub fn with_spill_threshold(mut self, spill_threshold: usize) -> Self {
         self.spill_threshold = spill_threshold;
         self
     }
 
-    pub(crate) fn with_start_partitioned(mut self, start_partitioned: bool) -> Self {
-        self.start_partitioned = true;
+    pub fn with_start_partitioned(mut self, start_partitioned: bool) -> Self {
+        self.start_partitioned = start_partitioned;
         self
+    }
+}
+
+impl AdaptiveBufferOptions {
+    pub fn passive() -> Self {
+        Self::default()
+            .with_partition_threshold(usize::MAX)
+            .with_spill_threshold(usize::MAX)
+            .with_start_partitioned(false)
+    }
+
+    pub fn always_partition() -> Self {
+        Self::default()
+            .with_partition_threshold(0)
+            .with_spill_threshold(usize::MAX)
+            .with_start_partitioned(true)
     }
 }
 
@@ -130,8 +146,8 @@ impl Partition {
 
     fn spilled(&self) -> bool {
         match &self.state {
-            PartitionState::InMemory { batches } => false,
-            PartitionState::Spilling { writer, file: _ } => true,
+            PartitionState::InMemory { batches: _ } => false,
+            PartitionState::Spilling { writer: _, file: _ } => true,
         }
     }
 
@@ -154,7 +170,7 @@ impl Partition {
 
                 Ok(())
             }
-            PartitionState::Spilling { writer, file: _ } => {
+            PartitionState::Spilling { writer: _, file: _ } => {
                 panic!("Can not spill a spilled partition");
             }
         }
@@ -289,7 +305,7 @@ impl AdaptiveBuffer {
         }
     }
 
-    pub(crate) async fn buffer(
+    pub(crate) async fn _buffer(
         &mut self,
         mut stream: SendableRecordBatchStream,
     ) -> Result<()> {
@@ -457,7 +473,7 @@ impl AdaptiveBuffer {
 
 #[cfg(test)]
 mod tests {
-    use arrow_array::{Int32Array, Int64Array};
+    use arrow::array::{Int32Array, Int64Array};
     use arrow_schema::{DataType, Field};
     use datafusion_execution::runtime_env::RuntimeEnvBuilder;
     use datafusion_physical_expr::expressions::col;
@@ -479,7 +495,7 @@ mod tests {
             partition_threshold: 3,
             spill_threshold: 100,
             partition_value: 3,
-            page_grow_factor: 2,
+            _page_grow_factor: 2,
             start_partitioned: false,
         };
 
