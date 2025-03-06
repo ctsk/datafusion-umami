@@ -195,7 +195,7 @@ impl Partition {
             PartitionState::InMemory { batches } => {
                 Ok(MaterializedPartition::InMemory {
                     batches,
-                    metrics: self.metrics,
+                    _metrics: self.metrics,
                 })
                 // let batches = std::mem::take(batches);
                 // self.metrics = Default::default();
@@ -207,27 +207,12 @@ impl Partition {
 
                 Ok(MaterializedPartition::Spilled {
                     file,
-                    metrics: self.spilled_metrics,
+                    _metrics: self.spilled_metrics,
                 })
             }
         }
     }
 }
-
-// #[derive(Default, Debug, PartialEq, Clone)]
-// struct PartitionMetrics {
-//     num_batches: metrics::Gauge,
-//     num_rows: metrics::Gauge,
-//     mem_used: metrics::Gauge,
-// }
-
-// impl PartitionMetrics {
-//     fn update(&mut self, batch: &RecordBatch) {
-//         self.num_batches.add(1);
-//         self.num_rows.add(batch.num_rows());
-//         self.mem_used.add(batch.get_array_memory_size());
-//     }
-// }
 
 #[derive(Debug, PartialEq)]
 enum State {

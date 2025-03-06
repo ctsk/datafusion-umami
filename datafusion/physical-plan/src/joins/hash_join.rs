@@ -103,7 +103,7 @@ struct JoinLeftData {
     visited_indices_bitmap: SharedBitmapBuilder,
     /// Counter of running probe-threads, potentially
     /// able to update `visited_indices_bitmap`
-    probe_threads_counter: AtomicUsize,
+    _probe_threads_counter: AtomicUsize,
     /// We need to keep this field to maintain accurate memory accounting, even though we don't directly use it.
     /// Without holding onto this reservation, the recorded memory usage would become inconsistent with actual usage.
     /// This could hide potential out-of-memory issues, especially when upstream operators increase their memory consumption.
@@ -118,7 +118,7 @@ impl JoinLeftData {
         batch: RecordBatch,
         values: Vec<ArrayRef>,
         visited_indices_bitmap: SharedBitmapBuilder,
-        probe_threads_counter: AtomicUsize,
+        _probe_threads_counter: AtomicUsize,
         reservation: MemoryReservation,
     ) -> Self {
         Self {
@@ -126,7 +126,7 @@ impl JoinLeftData {
             batch,
             values,
             visited_indices_bitmap,
-            probe_threads_counter,
+            _probe_threads_counter,
             _reservation: reservation,
         }
     }
@@ -153,8 +153,8 @@ impl JoinLeftData {
 
     /// Decrements the counter of running threads, and returns `true`
     /// if caller is the last running thread
-    fn report_probe_completed(&self) -> bool {
-        self.probe_threads_counter.fetch_sub(1, Ordering::Relaxed) == 1
+    fn _report_probe_completed(&self) -> bool {
+        self._probe_threads_counter.fetch_sub(1, Ordering::Relaxed) == 1
     }
 }
 
@@ -343,13 +343,13 @@ pub struct HashJoinExec {
     ///
     /// Each output stream waits on the `OnceAsync` to signal the completion of
     /// the hash table creation.
-    left_fut: OnceAsync<RwLock<(JoinLeftData, MaterializedBatches)>>,
+    _left_fut: OnceAsync<RwLock<(JoinLeftData, MaterializedBatches)>>,
     /// Shared the `RandomState` for the hashing algorithm
     random_state: RandomState,
     /// Partitioning mode to use
     pub mode: PartitionMode,
     /// Execution metrics
-    metrics: ExecutionPlanMetricsSet,
+    metrics: Arc<ExecutionPlanMetricsSet>,
     /// The projection indices of the columns in the output schema of join
     pub projection: Option<Vec<usize>>,
     /// Information of index and left / right placement of columns
@@ -420,10 +420,10 @@ impl HashJoinExec {
             filter,
             join_type: *join_type,
             join_schema,
-            left_fut: Default::default(),
+            _left_fut: Default::default(),
             random_state,
             mode: partition_mode,
-            metrics: ExecutionPlanMetricsSet::new(),
+            metrics: Arc::new(ExecutionPlanMetricsSet::new()),
             projection,
             column_indices,
             null_equals_null,
@@ -838,7 +838,7 @@ impl ExecutionPlan for HashJoinExec {
                     join_metrics.clone(),
                     reservation,
                     need_produce_result_in_final(self.join_type),
-                    1,
+                    probe_threads_count,
                     context.runtime_env(),
                     self.adaptive_options.clone(),
                 ))
@@ -1331,7 +1331,7 @@ impl ProbeBatchPartitioner {
                 let mat_part = MaterializedPartition::Spilled {
                     file,
                     // TODO: add real metrics
-                    metrics: PartitionMetrics::default(),
+                    _metrics: PartitionMetrics::default(),
                 };
 
                 materialized_partitions.push(mat_part);
@@ -1339,7 +1339,7 @@ impl ProbeBatchPartitioner {
                 materialized_partitions.push(MaterializedPartition::InMemory {
                     batches: vec![],
                     // TODO: add real metrics
-                    metrics: PartitionMetrics::default(),
+                    _metrics: PartitionMetrics::default(),
                 });
             }
         }
@@ -4495,7 +4495,7 @@ mod tests {
         let batch = build_table_i32(a, b, c);
         let schema = batch.schema();
         Arc::new(
-            MemoryExec::try_new(
+            TestMemoryExec::try_new(
                 &[vec![batch.clone(), batch.clone(), batch]],
                 schema,
                 None,

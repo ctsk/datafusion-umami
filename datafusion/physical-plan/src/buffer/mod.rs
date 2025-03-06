@@ -12,6 +12,7 @@ const BUFFER: usize = 8192;
 
 pub(crate) mod adaptive_buffer;
 pub(crate) mod memory_buffer;
+pub(crate) mod buffer_metrics;
 
 #[derive(Debug, Default, PartialEq, Clone)]
 pub(crate) struct PartitionMetrics {
@@ -32,11 +33,11 @@ impl PartitionMetrics {
 pub(crate) enum MaterializedPartition {
     InMemory {
         batches: Vec<RecordBatch>,
-        metrics: PartitionMetrics,
+        _metrics: PartitionMetrics,
     },
     Spilled {
         file: RefCountedTempFile,
-        metrics: PartitionMetrics,
+        _metrics: PartitionMetrics,
     },
 }
 
@@ -73,7 +74,7 @@ pub(crate) struct MaterializedBatches {
     unpartitioned: Vec<RecordBatch>,
     partitions: Vec<MaterializedPartition>,
     total: PartitionMetrics,
-    total_spilled: PartitionMetrics,
+    _total_spilled: PartitionMetrics,
 }
 
 impl std::fmt::Display for MaterializedBatches {
@@ -102,7 +103,7 @@ impl MaterializedBatches {
             unpartitioned,
             partitions: vec![],
             total,
-            total_spilled: PartitionMetrics::default(),
+            _total_spilled: PartitionMetrics::default(),
         }
     }
 
@@ -110,14 +111,14 @@ impl MaterializedBatches {
         schema: SchemaRef,
         partitions: Vec<MaterializedPartition>,
         total: PartitionMetrics,
-        total_spilled: PartitionMetrics,
+        _total_spilled: PartitionMetrics,
     ) -> Self {
         Self {
             schema,
             unpartitioned: vec![],
             partitions,
             total,
-            total_spilled,
+            _total_spilled,
         }
     }
 
@@ -126,14 +127,14 @@ impl MaterializedBatches {
         unpartitioned: Vec<RecordBatch>,
         partitions: Vec<MaterializedPartition>,
         total: PartitionMetrics,
-        total_spilled: PartitionMetrics,
+        _total_spilled: PartitionMetrics,
     ) -> Self {
         Self {
             schema,
             unpartitioned,
             partitions,
             total,
-            total_spilled,
+            _total_spilled,
         }
     }
 
@@ -168,11 +169,11 @@ impl MaterializedBatches {
             .chain(self.partitions.iter_mut().flat_map(|part| match part {
                 MaterializedPartition::InMemory {
                     batches,
-                    metrics: _,
+                    _metrics: _,
                 } => std::mem::take(batches),
                 MaterializedPartition::Spilled {
                     file: _,
-                    metrics: _,
+                    _metrics: _,
                 } => {
                     vec![]
                 }
@@ -187,6 +188,7 @@ impl MaterializedBatches {
             .map_err(|e| e.into())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn take_next_spilled(
         &mut self,
     ) -> Option<(usize, Result<Vec<RecordBatch>>)> {
@@ -199,11 +201,11 @@ impl MaterializedBatches {
             &mut self.partitions[part_id],
             MaterializedPartition::InMemory {
                 batches: vec![],
-                metrics: PartitionMetrics::default(),
+                _metrics: PartitionMetrics::default(),
             },
         );
 
-        if let MaterializedPartition::Spilled { file, metrics: _ } = part {
+        if let MaterializedPartition::Spilled { file, _metrics: _ } = part {
             Some(
                 (part_id, Self::read_spill_batches(file.path()))
             )
@@ -220,12 +222,12 @@ impl MaterializedBatches {
             &mut self.partitions[id],
             MaterializedPartition::InMemory {
                 batches: vec![],
-                metrics: PartitionMetrics::default(),
+                _metrics: PartitionMetrics::default(),
             },
         );
 
 
-        if let MaterializedPartition::Spilled { file, metrics: _ } = part {
+        if let MaterializedPartition::Spilled { file, _metrics: _ } = part {
             Some(
                 Self::read_spill_batches(file.path())
             )
@@ -243,11 +245,11 @@ impl MaterializedBatches {
             &mut self.partitions[id],
             MaterializedPartition::InMemory {
                 batches: vec![],
-                metrics: PartitionMetrics::default(),
+                _metrics: PartitionMetrics::default(),
             },
         );
 
-        if let MaterializedPartition::Spilled { file, metrics: _ } = part {
+        if let MaterializedPartition::Spilled { file, _metrics: _ } = part {
             Some(
                 read_spill_as_stream(file, self.schema.clone(), BUFFER)
             )

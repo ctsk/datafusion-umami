@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use arrow::array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion_common::error::Result;
