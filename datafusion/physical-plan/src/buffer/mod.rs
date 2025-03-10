@@ -1,18 +1,19 @@
 use std::{fs::File, io::BufReader, path::Path};
 
-use arrow::{ipc::reader::FileReader, util::pretty::pretty_format_batches};
 use arrow::array::RecordBatch;
+use arrow::{ipc::reader::FileReader, util::pretty::pretty_format_batches};
 use arrow_schema::SchemaRef;
 use datafusion_common::error::Result;
 use datafusion_execution::{disk_manager::RefCountedTempFile, SendableRecordBatchStream};
 
+use crate::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
 use crate::{metrics, spill::read_spill_as_stream};
 
 const BUFFER: usize = 8192;
 
 pub(crate) mod adaptive_buffer;
-pub(crate) mod memory_buffer;
 pub(crate) mod buffer_metrics;
+pub(crate) mod memory_buffer;
 
 #[derive(Debug, Default, PartialEq, Clone)]
 pub(crate) struct PartitionMetrics {
@@ -22,10 +23,37 @@ pub(crate) struct PartitionMetrics {
 }
 
 impl PartitionMetrics {
-    fn update(&mut self, batch: &RecordBatch) {
+    pub(crate) fn register(
+        name: &str,
+        partition: usize,
+        metrics: &ExecutionPlanMetricsSet,
+    ) -> Self {
+        Self {
+            num_batches: MetricBuilder::new(metrics)
+                .gauge(format!("{name}_num_batches"), partition),
+            num_rows: MetricBuilder::new(metrics)
+                .gauge(format!("{name}_num_rows"), partition),
+            mem_used: MetricBuilder::new(metrics)
+                .gauge(format!("{name}_mem_used"), partition),
+        }
+    }
+
+    pub(crate) fn update(&self, batch: &RecordBatch) {
         self.num_batches.add(1);
         self.num_rows.add(batch.num_rows());
         self.mem_used.add(batch.get_array_memory_size());
+    }
+
+    pub(crate) fn add(&self, other: &PartitionMetrics) {
+        self.num_batches.add(other.num_batches.value());
+        self.num_rows.add(other.num_rows.value());
+        self.mem_used.add(other.mem_used.value());
+    }
+
+    pub(crate) fn retract(&self, batch: &RecordBatch) {
+        self.num_batches.sub(1);
+        self.num_rows.sub(batch.num_rows());
+        self.mem_used.sub(batch.get_array_memory_size());
     }
 }
 
@@ -82,7 +110,11 @@ impl std::fmt::Display for MaterializedBatches {
         writeln!(f, "MaterializedBatches")?;
         if !self.unpartitioned.is_empty() {
             writeln!(f, "  Unpartitioned:")?;
-            writeln!(f, "  {}", pretty_format_batches(&self.unpartitioned).unwrap())?;
+            writeln!(
+                f,
+                "  {}",
+                pretty_format_batches(&self.unpartitioned).unwrap()
+            )?;
         }
         for (i, partition) in self.partitions.iter().enumerate() {
             writeln!(f, "  Partition {}:", i)?;
@@ -184,7 +216,8 @@ impl MaterializedBatches {
     fn read_spill_batches(path: &Path) -> Result<Vec<RecordBatch>> {
         let file = BufReader::new(File::open(path)?);
         let reader = FileReader::try_new(file, None)?;
-        reader.collect::<std::result::Result<Vec<_>, arrow::error::ArrowError>>()
+        reader
+            .collect::<std::result::Result<Vec<_>, arrow::error::ArrowError>>()
             .map_err(|e| e.into())
     }
 
@@ -206,18 +239,13 @@ impl MaterializedBatches {
         );
 
         if let MaterializedPartition::Spilled { file, _metrics: _ } = part {
-            Some(
-                (part_id, Self::read_spill_batches(file.path()))
-            )
+            Some((part_id, Self::read_spill_batches(file.path())))
         } else {
             unreachable!()
         }
     }
 
-    pub(crate) fn read_spill(
-        &mut self,
-        id: usize,
-    ) -> Option<Result<Vec<RecordBatch>>> {
+    pub(crate) fn read_spill(&mut self, id: usize) -> Option<Result<Vec<RecordBatch>>> {
         let part = std::mem::replace(
             &mut self.partitions[id],
             MaterializedPartition::InMemory {
@@ -226,16 +254,12 @@ impl MaterializedBatches {
             },
         );
 
-
         if let MaterializedPartition::Spilled { file, _metrics: _ } = part {
-            Some(
-                Self::read_spill_batches(file.path())
-            )
+            Some(Self::read_spill_batches(file.path()))
         } else {
             unreachable!()
         }
     }
-
 
     pub(crate) fn stream_spill(
         &mut self,
@@ -250,9 +274,7 @@ impl MaterializedBatches {
         );
 
         if let MaterializedPartition::Spilled { file, _metrics: _ } = part {
-            Some(
-                read_spill_as_stream(file, self.schema.clone(), BUFFER)
-            )
+            Some(read_spill_as_stream(file, self.schema.clone(), BUFFER))
         } else {
             unreachable!()
         }

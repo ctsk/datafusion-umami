@@ -33,16 +33,17 @@ use super::{
     PartitionMode, SharedBitmapBuilder,
 };
 use crate::buffer::adaptive_buffer::{AdaptiveBuffer, AdaptiveBufferOptions};
+use crate::buffer::buffer_metrics::BufferMetrics;
 use crate::buffer::{MaterializedBatches, MaterializedPartition, PartitionMetrics};
 use crate::common::IPCWriter;
 use crate::execution_plan::{boundedness_from_children, EmissionType};
+use crate::metrics;
 use crate::projection::{
     try_embed_projection, try_pushdown_through_join, EmbeddedProjection, JoinData,
     ProjectionExec,
 };
-use crate::ExecutionPlanProperties;
 use crate::repartition::BatchPartitioner;
-use crate::metrics;
+use crate::ExecutionPlanProperties;
 use crate::{
     coalesce_partitions::CoalescePartitionsExec,
     common::can_project,
@@ -411,7 +412,8 @@ impl HashJoinExec {
             projection.as_ref(),
         )?;
 
-        let adaptive_options = AdaptiveBufferOptions::default().with_start_partitioned(true);
+        let adaptive_options =
+            AdaptiveBufferOptions::default().with_start_partitioned(true);
 
         Ok(HashJoinExec {
             left,
@@ -804,9 +806,9 @@ impl ExecutionPlan for HashJoinExec {
         };
 
         let join_metrics = BuildProbeJoinMetrics::new(partition, &self.metrics);
+        let buffer_metrics = BufferMetrics::new(partition, &self.metrics);
         let left_fut = match self.mode {
-            PartitionMode::CollectLeft => 
-                unreachable!(),
+            PartitionMode::CollectLeft => unreachable!(),
             // self.left_fut.once(|| {
             //     let reservation =
             //         MemoryConsumer::new("HashJoinInput").register(context.memory_pool());
@@ -836,6 +838,7 @@ impl ExecutionPlan for HashJoinExec {
                     on_left.clone(),
                     Arc::clone(&context),
                     join_metrics.clone(),
+                    buffer_metrics.clone(),
                     reservation,
                     need_produce_result_in_final(self.join_type),
                     probe_threads_count,
@@ -962,6 +965,7 @@ async fn collect_left_input(
     on_left: Vec<PhysicalExprRef>,
     context: Arc<TaskContext>,
     metrics: BuildProbeJoinMetrics,
+    buffer_metrics: BufferMetrics,
     reservation: MemoryReservation,
     with_visited_indices_bitmap: bool,
     probe_threads_count: usize,
@@ -994,7 +998,7 @@ async fn collect_left_input(
     while let Some(batch) = stream.next().await {
         memory_buffer.push(batch?)?;
     }
-    let mut batches = memory_buffer.finalize()?;
+    let mut batches = memory_buffer.finalize(buffer_metrics)?;
 
     metrics.build_mem_used.add(batches.mem_used());
     metrics.build_input_batches.add(batches.num_batches());
@@ -1571,9 +1575,7 @@ impl HashJoinStream {
                 HashJoinStreamState::LoadNextPartition => {
                     handle_state!(self.load_next_partition())
                 }
-                HashJoinStreamState::Complete => {
-                    Poll::Ready(None)
-                },
+                HashJoinStreamState::Complete => Poll::Ready(None),
             };
         }
     }
@@ -1963,10 +1965,11 @@ mod tests {
             null_equals_null,
         )?;
 
-        exec = exec.with_adaptive_options(AdaptiveBufferOptions::default()
-            .with_spill_threshold(usize::MAX)
-            .with_partition_threshold(1 << 16)
-            .with_start_partitioned(false)
+        exec = exec.with_adaptive_options(
+            AdaptiveBufferOptions::default()
+                .with_spill_threshold(usize::MAX)
+                .with_partition_threshold(1 << 16)
+                .with_start_partitioned(false),
         );
 
         Ok(exec)
@@ -1991,10 +1994,11 @@ mod tests {
             null_equals_null,
         )?;
 
-        exec = exec.with_adaptive_options(AdaptiveBufferOptions::default()
-            .with_spill_threshold(usize::MAX)
-            .with_partition_threshold(1 << 16)
-            .with_start_partitioned(false)
+        exec = exec.with_adaptive_options(
+            AdaptiveBufferOptions::default()
+                .with_spill_threshold(usize::MAX)
+                .with_partition_threshold(1 << 16)
+                .with_start_partitioned(false),
         );
 
         Ok(exec)

@@ -10,7 +10,10 @@ use datafusion_execution::{
 use datafusion_physical_expr::{Partitioning, PhysicalExprRef};
 use futures::StreamExt;
 
-use super::{MaterializedBatches, MaterializedPartition, PartitionMetrics};
+use super::{
+    buffer_metrics::BufferMetrics, MaterializedBatches, MaterializedPartition,
+    PartitionMetrics,
+};
 
 //
 //  TRANSITIONS
@@ -154,11 +157,11 @@ impl Partition {
     fn spill(&mut self, schema: &Schema, runtime: &RuntimeEnv) -> Result<()> {
         match &self.state {
             PartitionState::InMemory { batches } => {
-                self.metrics = Default::default();
                 let spill_file = runtime.disk_manager.create_tmp_file(&SPILL_ID)?;
                 let mut writer = IPCWriter::new(spill_file.path(), schema)?;
 
                 for batch in batches {
+                    self.metrics.retract(&batch);
                     self.spilled_metrics.update(&batch);
                     writer.write(&batch)?;
                 }
@@ -321,13 +324,19 @@ impl AdaptiveBuffer {
         self.update_state()
     }
 
-    pub(crate) fn finalize(mut self) -> Result<MaterializedBatches> {
+    pub(crate) fn finalize(
+        mut self,
+        metrics: BufferMetrics,
+    ) -> Result<MaterializedBatches> {
         match self.state {
-            State::Standard { batches } => Ok(MaterializedBatches::from_unpartitioned(
-                self.schema,
-                batches,
-                self.totals,
-            )),
+            State::Standard { batches } => {
+                metrics.unpartitioned.add(&self.totals);
+                Ok(MaterializedBatches::from_unpartitioned(
+                    self.schema,
+                    batches,
+                    self.totals,
+                ))
+            }
             State::Partitioned {
                 unpartitioned,
                 mut partitions,
@@ -346,6 +355,12 @@ impl AdaptiveBuffer {
                         )?;
                     }
 
+                    for partition in partitions.iter() {
+                        metrics.partitioned.add(&partition.metrics);
+                        metrics.partitioned.add(&partition.spilled_metrics);
+                        metrics.spilled.add(&partition.spilled_metrics);
+                    }
+
                     Ok(MaterializedBatches::from_partitioned(
                         self.schema,
                         partitions
@@ -356,6 +371,14 @@ impl AdaptiveBuffer {
                         self.totals_spilled,
                     ))
                 } else {
+                    for batch in unpartitioned.iter() {
+                        metrics.unpartitioned.update(batch);
+                    }
+
+                    for partition in partitions.iter() {
+                        metrics.partitioned.add(&partition.metrics);
+                    }
+
                     Ok(MaterializedBatches::from_partially_partitioned(
                         self.schema,
                         unpartitioned,
