@@ -1068,7 +1068,7 @@ fn build_join_left_data(
         metrics.build_mem_used.add(bitmap_size);
 
         let mut bitmap_buffer = BooleanBufferBuilder::new(single_batch.num_rows());
-        bitmap_buffer.append_n(metrics.build_input_rows.value(), false);
+        bitmap_buffer.append_n(num_rows, false);
         bitmap_buffer
     } else {
         BooleanBufferBuilder::new(0)

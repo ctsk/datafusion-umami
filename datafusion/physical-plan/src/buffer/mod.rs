@@ -274,9 +274,53 @@ impl MaterializedBatches {
         );
 
         if let MaterializedPartition::Spilled { file, _metrics: _ } = part {
-            Some(read_spill_as_stream(file, self.schema.clone(), BUFFER))
+            Some(utils::read_spill_as_stream(
+                file,
+                self.schema.clone(),
+                BUFFER,
+            ))
         } else {
             unreachable!()
         }
+    }
+}
+
+mod utils {
+    use arrow_schema::SchemaRef;
+    use datafusion_common::exec_datafusion_err;
+    use datafusion_execution::disk_manager::RefCountedTempFile;
+    use tokio::sync::mpsc::Sender;
+
+    use crate::stream::RecordBatchReceiverStream;
+
+    use super::*;
+
+    /// Read spilled batches from the disk
+    ///
+    /// `path` - temp file
+    /// `schema` - batches schema, should be the same across batches
+    /// `buffer` - internal buffer of capacity batches
+    pub(crate) fn read_spill_as_stream(
+        path: RefCountedTempFile,
+        schema: SchemaRef,
+        buffer: usize,
+    ) -> Result<SendableRecordBatchStream> {
+        let mut builder = RecordBatchReceiverStream::builder(schema, buffer);
+        let sender = builder.tx();
+
+        builder.spawn_blocking(move || read_spill(sender, path.path()));
+
+        Ok(builder.build())
+    }
+
+    fn read_spill(sender: Sender<Result<RecordBatch>>, path: &Path) -> Result<()> {
+        let file = BufReader::new(File::open(path)?);
+        let reader = FileReader::try_new(file, None)?;
+        for batch in reader {
+            sender
+                .blocking_send(batch.map_err(Into::into))
+                .map_err(|e| exec_datafusion_err!("{e}"))?;
+        }
+        Ok(())
     }
 }
