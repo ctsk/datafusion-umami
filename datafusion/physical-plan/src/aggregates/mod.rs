@@ -26,6 +26,7 @@ use crate::aggregates::{
     topk_stream::GroupedTopKAggregateStream,
 };
 use crate::execution_plan::{CardinalityEffect, EmissionType};
+use crate::materialize::StreamFactory;
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use crate::projection::get_field_metadata;
 use crate::windows::get_ordered_partition_by_indices;
@@ -49,6 +50,7 @@ use datafusion_physical_expr::{
 };
 
 use itertools::Itertools;
+use row_hash::GroupedHashAggregateStreamFactory;
 
 pub(crate) mod group_values;
 mod no_grouping;
@@ -351,6 +353,7 @@ impl PartialEq for PhysicalGroupBy {
 enum StreamType {
     AggregateStream(AggregateStream),
     GroupedHash(GroupedHashAggregateStream),
+    MaterializeGroupedHash(SendableRecordBatchStream),
     GroupedPriorityQueue(GroupedTopKAggregateStream),
 }
 
@@ -359,6 +362,7 @@ impl From<StreamType> for SendableRecordBatchStream {
         match stream {
             StreamType::AggregateStream(stream) => Box::pin(stream),
             StreamType::GroupedHash(stream) => Box::pin(stream),
+            StreamType::MaterializeGroupedHash(stream) => stream,
             StreamType::GroupedPriorityQueue(stream) => Box::pin(stream),
         }
     }
@@ -616,9 +620,38 @@ impl AggregateExec {
         }
 
         // grouping by something else and we need to just materialize all results
-        Ok(StreamType::GroupedHash(GroupedHashAggregateStream::new(
-            self, context, partition,
-        )?))
+        match self.mode {
+            AggregateMode::Partial => Ok(StreamType::GroupedHash(
+                GroupedHashAggregateStream::new(self, context, partition)?,
+            )),
+            _ => {
+                let factory = GroupedHashAggregateStreamFactory::try_new(
+                    self,
+                    context.clone(),
+                    partition,
+                )?;
+                let input = self.input.execute(partition, context.clone())?;
+                // let metrics = BufferMetrics::new(partition, &self.metrics);
+                // let expr = self.group_by.input_exprs();
+                // let runtime_env = context.runtime_env();
+                // let options = AdaptiveBufferOptions::default().with_start_partitioned(true);
+                // let stream = AdaptiveMaterializeStream::new(
+                //     Box::new(factory),
+                //     input,
+                //     metrics,
+                //     expr,
+                //     runtime_env,
+                //     Some(options),
+                // );
+
+                Ok(StreamType::MaterializeGroupedHash(
+                    factory.make(input)?, // stream.stream()
+                ))
+                // Ok(StreamType::MaterializeGroupedHash(
+                //     factory.make(self.input.execute(partition, context)?)?
+                // ))
+            }
+        }
     }
 
     /// Finds the DataType and SortDirection for this Aggregate, if there is one
@@ -2279,7 +2312,7 @@ mod tests {
                 "| 4 | 3.0                                        |",
                 "+---+--------------------------------------------+",
             ];
-            assert_batches_eq!(expected, &result);
+            assert_batches_sorted_eq!(expected, &result);
         } else {
             let expected = [
                 "+---+-------------------------------------------+",
@@ -2290,7 +2323,7 @@ mod tests {
                 "| 4 | 6.0                                       |",
                 "+---+-------------------------------------------+",
             ];
-            assert_batches_eq!(expected, &result);
+            assert_batches_sorted_eq!(expected, &result);
         };
         Ok(())
     }

@@ -1,38 +1,60 @@
+use std::sync::Arc;
+
 use arrow::array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion_common::error::Result;
-use datafusion_execution::SendableRecordBatchStream;
+use datafusion_execution::{runtime_env::RuntimeEnv, SendableRecordBatchStream};
+use datafusion_physical_expr::PhysicalExprRef;
 use futures::StreamExt;
 
 use crate::{
     buffer::{
-        adaptive_buffer::AdaptiveBuffer, buffer_metrics::BufferMetrics,
+        adaptive_buffer::{AdaptiveBuffer, AdaptiveBufferOptions},
+        buffer_metrics::BufferMetrics,
     },
     memory::MemoryStream,
     stream::RecordBatchStreamAdapter,
 };
 
 pub(crate) trait StreamFactory {
-    fn make(&self, input: SendableRecordBatchStream) -> Result<SendableRecordBatchStream>;
+    fn schema(&self) -> SchemaRef;
+    fn make(&self, input: SendableRecordBatchStream)
+        -> Result<SendableRecordBatchStream>;
 }
 
 pub(crate) struct AdaptiveMaterializeStream {
     stream_factory: Box<dyn StreamFactory + Send>,
-    schema: SchemaRef,
     input: SendableRecordBatchStream,
     metrics: BufferMetrics,
-}
-
-pub(crate) fn materialize() -> AdaptiveMaterializeStream {
-    todo!()
+    expr: Vec<PhysicalExprRef>,
+    runtime: Arc<RuntimeEnv>,
+    options: Option<AdaptiveBufferOptions>,
 }
 
 type Sink = genawaiter::sync::Co<Result<RecordBatch>>;
 
 impl AdaptiveMaterializeStream {
+    pub fn new(
+        stream_factory: Box<dyn StreamFactory + Send>,
+        input: SendableRecordBatchStream,
+        metrics: BufferMetrics,
+        expr: Vec<PhysicalExprRef>,
+        runtime: Arc<RuntimeEnv>,
+        options: Option<AdaptiveBufferOptions>,
+    ) -> Self {
+        Self {
+            stream_factory,
+            input,
+            metrics,
+            expr,
+            runtime,
+            options,
+        }
+    }
+
     pub fn stream(self) -> SendableRecordBatchStream {
         Box::pin(RecordBatchStreamAdapter::new(
-            self.schema.clone(),
+            self.stream_factory.schema(),
             genawaiter::sync::Gen::new(|co| self.run_wrapped(co)),
         ))
     }
@@ -45,12 +67,17 @@ impl AdaptiveMaterializeStream {
         }
     }
 
-    pub fn mk_buffer(&self) -> AdaptiveBuffer {
-        todo!()
+    pub fn new_buffer(&self) -> Result<AdaptiveBuffer> {
+        AdaptiveBuffer::try_new(
+            self.expr.clone(),
+            self.runtime.clone(),
+            self.input.schema(),
+            self.options.clone(),
+        )
     }
 
     pub async fn run(mut self, sink: &mut Sink) -> Result<()> {
-        let mut buffer = self.mk_buffer();
+        let mut buffer = self.new_buffer()?;
         while let Some(batch) = self.input.next().await {
             let batch = batch?;
             buffer.push(batch)?;

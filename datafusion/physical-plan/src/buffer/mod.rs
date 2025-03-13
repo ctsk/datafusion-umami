@@ -6,8 +6,8 @@ use arrow_schema::SchemaRef;
 use datafusion_common::error::Result;
 use datafusion_execution::{disk_manager::RefCountedTempFile, SendableRecordBatchStream};
 
+use crate::metrics;
 use crate::metrics::{ExecutionPlanMetricsSet, MetricBuilder};
-use crate::{metrics, spill::read_spill_as_stream};
 
 const BUFFER: usize = 8192;
 

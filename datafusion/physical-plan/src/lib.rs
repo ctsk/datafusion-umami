@@ -51,8 +51,8 @@ pub use crate::topk::TopK;
 pub use crate::visitor::{accept, visit_execution_plan, ExecutionPlanVisitor};
 
 mod buffer;
-mod ordering;
 mod materialize;
+mod ordering;
 mod render_tree;
 mod topk;
 mod visitor;
