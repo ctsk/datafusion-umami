@@ -25,8 +25,10 @@ use crate::aggregates::{
     no_grouping::AggregateStream, row_hash::GroupedHashAggregateStream,
     topk_stream::GroupedTopKAggregateStream,
 };
+use crate::buffer::adaptive_buffer::AdaptiveBufferOptions;
+use crate::buffer::buffer_metrics::BufferMetrics;
 use crate::execution_plan::{CardinalityEffect, EmissionType};
-use crate::materialize::StreamFactory;
+use crate::materialize::{AdaptiveMaterializeStream, StreamFactory};
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use crate::projection::get_field_metadata;
 use crate::windows::get_ordered_partition_by_indices;
@@ -620,38 +622,41 @@ impl AggregateExec {
         }
 
         // grouping by something else and we need to just materialize all results
-        match self.mode {
-            AggregateMode::Partial => Ok(StreamType::GroupedHash(
+        if self.mode == AggregateMode::Partial {
+            return Ok(StreamType::GroupedHash(
                 GroupedHashAggregateStream::new(self, context, partition)?,
-            )),
-            _ => {
-                let factory = GroupedHashAggregateStreamFactory::try_new(
-                    self,
-                    context.clone(),
-                    partition,
-                )?;
-                let input = self.input.execute(partition, context.clone())?;
-                // let metrics = BufferMetrics::new(partition, &self.metrics);
-                // let expr = self.group_by.input_exprs();
-                // let runtime_env = context.runtime_env();
-                // let options = AdaptiveBufferOptions::default().with_start_partitioned(true);
-                // let stream = AdaptiveMaterializeStream::new(
-                //     Box::new(factory),
-                //     input,
-                //     metrics,
-                //     expr,
-                //     runtime_env,
-                //     Some(options),
-                // );
-
-                Ok(StreamType::MaterializeGroupedHash(
-                    factory.make(input)?, // stream.stream()
-                ))
-                // Ok(StreamType::MaterializeGroupedHash(
-                //     factory.make(self.input.execute(partition, context)?)?
-                // ))
-            }
+            ));
         }
+
+        if self.input_order_mode == InputOrderMode::Sorted {
+            return Ok(StreamType::GroupedHash(
+                GroupedHashAggregateStream::new(self, context, partition)?,
+            ));
+        }
+
+        let factory = GroupedHashAggregateStreamFactory::try_new(
+            self,
+            context.clone(),
+            partition,
+        )?;
+
+        let input = self.input.execute(partition, context.clone())?;
+        let metrics = BufferMetrics::new(partition, &self.metrics);
+        let expr = self.group_by.input_exprs();
+        let runtime_env = context.runtime_env();
+        let options = AdaptiveBufferOptions::default().with_start_partitioned(true);
+        let stream = AdaptiveMaterializeStream::new(
+            Box::new(factory),
+            input,
+            metrics,
+            expr,
+            runtime_env,
+            Some(options),
+        );
+
+        Ok(StreamType::MaterializeGroupedHash(
+            stream.stream()
+        ))
     }
 
     /// Finds the DataType and SortDirection for this Aggregate, if there is one
