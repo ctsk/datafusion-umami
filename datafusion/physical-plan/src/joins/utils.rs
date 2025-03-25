@@ -23,7 +23,6 @@ use std::future::Future;
 use std::iter::once;
 use std::ops::Range;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use crate::metrics::{self, ExecutionPlanMetricsSet, MetricBuilder};
 use crate::{
@@ -59,9 +58,7 @@ use tokio::sync::OnceCell;
 
 use crate::joins::SharedBitmapBuilder;
 use crate::projection::ProjectionExec;
-use futures::future::{BoxFuture, Shared};
-use futures::{ready, FutureExt};
-use parking_lot::Mutex;
+use futures::future::BoxFuture;
 
 /// The on clause of the join, as vector of (left, right) columns.
 pub type JoinOn = Vec<(PhysicalExprRef, PhysicalExprRef)>;
@@ -345,7 +342,7 @@ impl<T> Debug for SharedResultOnceCell<T> {
 }
 
 impl<T> SharedResultOnceCell<T> {
-    pub(crate) async fn init<Fut>(self: Arc<Self>, f: Fut) -> SharedResult<Arc<T>>
+    pub(crate) async fn init<Fut>(self: Arc<Self>, f: Fut) -> Result<Arc<T>>
     where
         Fut: Future<Output = Result<T>> + Send + 'static,
     {
@@ -353,75 +350,11 @@ impl<T> SharedResultOnceCell<T> {
             .get_or_init(|| async { f.await.map(Arc::new).map_err(Arc::new) })
             .await
             .clone()
+            .map_err(DataFusionError::Shared)
     }
 }
 
-/// A [`OnceAsync`] runs an `async` closure once, where multiple calls to
-/// [`OnceAsync::once`] return a [`OnceFut`] that resolves to the result of the
-/// same computation.
-///
-/// This is useful for joins where the results of one child are needed to proceed
-/// with multiple output stream
-///
-///
-/// For example, in a hash join, one input is buffered and shared across
-/// potentially multiple output partitions. Each output partition must wait for
-/// the hash table to be built before proceeding.
-///
-/// Each output partition waits on the same `OnceAsync` before proceeding.
-pub(crate) struct OnceAsync<T> {
-    fut: Mutex<Option<OnceFut<T>>>,
-}
-
-impl<T> Default for OnceAsync<T> {
-    fn default() -> Self {
-        Self {
-            fut: Mutex::new(None),
-        }
-    }
-}
-
-impl<T> Debug for OnceAsync<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "OnceAsync")
-    }
-}
-
-impl<T: 'static> OnceAsync<T> {
-    /// If this is the first call to this function on this object, will invoke
-    /// `f` to obtain a future and return a [`OnceFut`] referring to this
-    ///
-    /// If this is not the first call, will return a [`OnceFut`] referring
-    /// to the same future as was returned by the first call
-    pub(crate) fn once<F, Fut>(&self, f: F) -> OnceFut<T>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<T>> + Send + 'static,
-    {
-        self.fut
-            .lock()
-            .get_or_insert_with(|| OnceFut::new(f()))
-            .clone()
-    }
-}
-
-/// The shared future type used internally within [`OnceAsync`]
-type OnceFutPending<T> = Shared<BoxFuture<'static, SharedResult<Arc<T>>>>;
-
-/// A [`OnceFut`] represents a shared asynchronous computation, that will be evaluated
-/// once for all [`Clone`]'s, with [`OnceFut::get`] providing a non-consuming interface
-/// to drive the underlying [`Future`] to completion
-pub(crate) struct OnceFut<T> {
-    state: OnceFutState<T>,
-}
-
-impl<T> Clone for OnceFut<T> {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-        }
-    }
-}
+pub(crate) type SharedResultPending<T> = BoxFuture<'static, Result<Arc<T>>>;
 
 /// A shared state between statistic aggregators for a join
 /// operation.
@@ -741,73 +674,6 @@ fn max_distinct_count(
             }
 
             result
-        }
-    }
-}
-
-enum OnceFutState<T> {
-    Pending(OnceFutPending<T>),
-    Ready(SharedResult<Arc<T>>),
-}
-
-impl<T> Clone for OnceFutState<T> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Pending(p) => Self::Pending(p.clone()),
-            Self::Ready(r) => Self::Ready(r.clone()),
-        }
-    }
-}
-
-impl<T: 'static> OnceFut<T> {
-    /// Create a new [`OnceFut`] from a [`Future`]
-    pub(crate) fn new<Fut>(fut: Fut) -> Self
-    where
-        Fut: Future<Output = Result<T>> + Send + 'static,
-    {
-        Self::new_from_shared(fut.map(|res| res.map(Arc::new).map_err(Arc::new)))
-    }
-
-    /// Create a new [`OnceFut`] from a [`Future`] that returns a SharedResult<Arc<T>
-    pub(crate) fn new_from_shared<Fut>(fut: Fut) -> Self
-    where
-        Fut: Future<Output = SharedResult<Arc<T>>> + Send + 'static,
-    {
-        Self {
-            state: OnceFutState::Pending(fut.boxed().shared()),
-        }
-    }
-
-    /// Get the result of the computation if it is ready, without consuming it
-    pub(crate) fn get(&mut self, cx: &mut Context<'_>) -> Poll<Result<&T>> {
-        if let OnceFutState::Pending(fut) = &mut self.state {
-            let r = ready!(fut.poll_unpin(cx));
-            self.state = OnceFutState::Ready(r);
-        }
-
-        // Cannot use loop as this would trip up the borrow checker
-        match &self.state {
-            OnceFutState::Pending(_) => unreachable!(),
-            OnceFutState::Ready(r) => Poll::Ready(
-                r.as_ref()
-                    .map(|r| r.as_ref())
-                    .map_err(DataFusionError::from),
-            ),
-        }
-    }
-
-    /// Get shared reference to the result of the computation if it is ready, without consuming it
-    pub(crate) fn get_shared(&mut self, cx: &mut Context<'_>) -> Poll<Result<Arc<T>>> {
-        if let OnceFutState::Pending(fut) = &mut self.state {
-            let r = ready!(fut.poll_unpin(cx));
-            self.state = OnceFutState::Ready(r);
-        }
-
-        match &self.state {
-            OnceFutState::Pending(_) => unreachable!(),
-            OnceFutState::Ready(r) => {
-                Poll::Ready(r.clone().map_err(DataFusionError::Shared))
-            }
         }
     }
 }
@@ -1535,14 +1401,13 @@ pub(super) fn swap_join_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::pin::Pin;
 
     use arrow::array::Int32Array;
     use arrow::compute::SortOptions;
     use arrow::datatypes::{DataType, Fields};
-    use arrow::error::{ArrowError, Result as ArrowResult};
+
     use datafusion_common::stats::Precision::{Absent, Exact, Inexact};
-    use datafusion_common::{arrow_datafusion_err, arrow_err, ScalarValue};
+    use datafusion_common::ScalarValue;
 
     use rstest::rstest;
 
@@ -1585,39 +1450,6 @@ mod tests {
         )];
 
         assert!(check(&left, &right, on).is_err());
-    }
-
-    #[tokio::test]
-    async fn check_error_nesting() {
-        let once_fut = OnceFut::<()>::new(async {
-            arrow_err!(ArrowError::CsvError("some error".to_string()))
-        });
-
-        struct TestFut(OnceFut<()>);
-        impl Future for TestFut {
-            type Output = ArrowResult<()>;
-
-            fn poll(
-                mut self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<Self::Output> {
-                match ready!(self.0.get(cx)) {
-                    Ok(()) => Poll::Ready(Ok(())),
-                    Err(e) => Poll::Ready(Err(e.into())),
-                }
-            }
-        }
-
-        let res = TestFut(once_fut).await;
-        let arrow_err_from_fut = res.expect_err("once_fut always return error");
-
-        let wrapped_err = DataFusionError::from(arrow_err_from_fut);
-        let root_err = wrapped_err.find_root();
-
-        let _expected =
-            arrow_datafusion_err!(ArrowError::CsvError("some error".to_owned()));
-
-        assert!(matches!(root_err, _expected))
     }
 
     #[test]
@@ -2532,5 +2364,24 @@ mod tests {
             .expect("Projection items should be Column expression");
         assert_eq!(col.name(), name);
         assert_eq!(col.index(), index);
+    }
+
+    #[tokio::test]
+    async fn test_shared_result_once_cell() {
+        let cell1 = Arc::new(SharedResultOnceCell::<usize>::default());
+        let cell2 = Arc::clone(&cell1);
+
+        let fut1 = cell1.init(async { Ok(1) });
+        let fut2 = cell2.init(async { Ok(2) });
+
+        let val1 = fut1.await.unwrap();
+        assert_eq!(val1, Arc::new(1));
+
+        let val2 = fut2.await.unwrap();
+        assert_eq!(
+            val2,
+            Arc::new(1),
+            "SharedResultOnceCell should not be re-initialized"
+        );
     }
 }
