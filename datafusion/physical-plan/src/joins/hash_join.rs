@@ -32,17 +32,12 @@ use super::{
     utils::{OnceAsync, OnceFut},
     PartitionMode, SharedBitmapBuilder,
 };
-use crate::buffer::adaptive_buffer::{AdaptiveBuffer, AdaptiveBufferOptions};
-use crate::buffer::buffer_metrics::BufferMetrics;
-use crate::buffer::{MaterializedBatches, MaterializedPartition, PartitionMetrics};
-use crate::common::IPCWriter;
 use crate::execution_plan::{boundedness_from_children, EmissionType};
-use crate::metrics;
 use crate::projection::{
     try_embed_projection, try_pushdown_through_join, EmbeddedProjection, JoinData,
     ProjectionExec,
 };
-use crate::repartition::BatchPartitioner;
+use crate::spill::get_record_batch_memory_size;
 use crate::ExecutionPlanProperties;
 use crate::{
     coalesce_partitions::CoalescePartitionsExec,
@@ -77,9 +72,7 @@ use datafusion_common::{
     internal_datafusion_err, internal_err, plan_err, project_schema, DataFusionError,
     JoinSide, JoinType, Result,
 };
-use datafusion_execution::disk_manager::RefCountedTempFile;
 use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
-use datafusion_execution::runtime_env::RuntimeEnv;
 use datafusion_execution::TaskContext;
 use datafusion_expr::Operator;
 use datafusion_physical_expr::equivalence::{
@@ -89,8 +82,8 @@ use datafusion_physical_expr::PhysicalExprRef;
 use datafusion_physical_expr_common::datum::compare_op_for_nested;
 
 use ahash::RandomState;
-use futures::{ready, Stream, StreamExt};
-use parking_lot::{Mutex, RwLock};
+use futures::{ready, Stream, StreamExt, TryStreamExt};
+use parking_lot::Mutex;
 
 /// HashTable and input data for the left (build side) of a join
 struct JoinLeftData {
@@ -104,7 +97,7 @@ struct JoinLeftData {
     visited_indices_bitmap: SharedBitmapBuilder,
     /// Counter of running probe-threads, potentially
     /// able to update `visited_indices_bitmap`
-    _probe_threads_counter: AtomicUsize,
+    probe_threads_counter: AtomicUsize,
     /// We need to keep this field to maintain accurate memory accounting, even though we don't directly use it.
     /// Without holding onto this reservation, the recorded memory usage would become inconsistent with actual usage.
     /// This could hide potential out-of-memory issues, especially when upstream operators increase their memory consumption.
@@ -119,7 +112,7 @@ impl JoinLeftData {
         batch: RecordBatch,
         values: Vec<ArrayRef>,
         visited_indices_bitmap: SharedBitmapBuilder,
-        _probe_threads_counter: AtomicUsize,
+        probe_threads_counter: AtomicUsize,
         reservation: MemoryReservation,
     ) -> Self {
         Self {
@@ -127,7 +120,7 @@ impl JoinLeftData {
             batch,
             values,
             visited_indices_bitmap,
-            _probe_threads_counter,
+            probe_threads_counter,
             _reservation: reservation,
         }
     }
@@ -154,8 +147,8 @@ impl JoinLeftData {
 
     /// Decrements the counter of running threads, and returns `true`
     /// if caller is the last running thread
-    fn _report_probe_completed(&self) -> bool {
-        self._probe_threads_counter.fetch_sub(1, Ordering::Relaxed) == 1
+    fn report_probe_completed(&self) -> bool {
+        self.probe_threads_counter.fetch_sub(1, Ordering::Relaxed) == 1
     }
 }
 
@@ -344,13 +337,13 @@ pub struct HashJoinExec {
     ///
     /// Each output stream waits on the `OnceAsync` to signal the completion of
     /// the hash table creation.
-    _left_fut: OnceAsync<RwLock<(JoinLeftData, MaterializedBatches)>>,
+    left_fut: OnceAsync<JoinLeftData>,
     /// Shared the `RandomState` for the hashing algorithm
     random_state: RandomState,
     /// Partitioning mode to use
     pub mode: PartitionMode,
     /// Execution metrics
-    metrics: Arc<ExecutionPlanMetricsSet>,
+    metrics: ExecutionPlanMetricsSet,
     /// The projection indices of the columns in the output schema of join
     pub projection: Option<Vec<usize>>,
     /// Information of index and left / right placement of columns
@@ -362,8 +355,6 @@ pub struct HashJoinExec {
     pub null_equals_null: bool,
     /// Cache holding plan properties like equivalences, output partitioning etc.
     cache: PlanProperties,
-
-    adaptive_options: Option<AdaptiveBufferOptions>,
 }
 
 impl HashJoinExec {
@@ -388,8 +379,6 @@ impl HashJoinExec {
             return plan_err!("On constraints in HashJoinExec should be non-empty");
         }
 
-        assert_ne!(partition_mode, PartitionMode::CollectLeft);
-
         check_join_is_valid(&left_schema, &right_schema, &on)?;
 
         let (join_schema, column_indices) =
@@ -412,9 +401,6 @@ impl HashJoinExec {
             projection.as_ref(),
         )?;
 
-        let adaptive_options =
-            AdaptiveBufferOptions::default().with_start_partitioned(true);
-
         Ok(HashJoinExec {
             left,
             right,
@@ -422,15 +408,14 @@ impl HashJoinExec {
             filter,
             join_type: *join_type,
             join_schema,
-            _left_fut: Default::default(),
+            left_fut: Default::default(),
             random_state,
             mode: partition_mode,
-            metrics: Arc::new(ExecutionPlanMetricsSet::new()),
+            metrics: ExecutionPlanMetricsSet::new(),
             projection,
             column_indices,
             null_equals_null,
             cache,
-            adaptive_options: Some(adaptive_options),
         })
     }
 
@@ -521,11 +506,6 @@ impl HashJoinExec {
             self.mode,
             self.null_equals_null,
         )
-    }
-
-    pub fn with_adaptive_options(mut self, opts: AdaptiveBufferOptions) -> Self {
-        self.adaptive_options = Some(opts);
-        self
     }
 
     /// This function creates the cache object that stores the plan properties such as schema, equivalence properties, ordering, partitioning, etc.
@@ -799,33 +779,23 @@ impl ExecutionPlan for HashJoinExec {
             );
         }
 
-        let probe_threads_count = if self.mode == PartitionMode::CollectLeft {
-            right_partitions
-        } else {
-            1
-        };
-
         let join_metrics = BuildProbeJoinMetrics::new(partition, &self.metrics);
-        let buffer_metrics = BufferMetrics::new(partition, &self.metrics);
         let left_fut = match self.mode {
-            PartitionMode::CollectLeft => unreachable!(),
-            // self.left_fut.once(|| {
-            //     let reservation =
-            //         MemoryConsumer::new("HashJoinInput").register(context.memory_pool());
-            //     collect_left_input(
-            //         None,
-            //         self.random_state.clone(),
-            //         Arc::clone(&self.left),
-            //         on_left.clone(),
-            //         Arc::clone(&context),
-            //         join_metrics.clone(),
-            //         reservation,
-            //         need_produce_result_in_final(self.join_type),
-            //         probe_threads_count,
-            //         context.runtime_env(),
-            //         self.adaptive_options.clone(),
-            //     )
-            // }),
+            PartitionMode::CollectLeft => self.left_fut.once(|| {
+                let reservation =
+                    MemoryConsumer::new("HashJoinInput").register(context.memory_pool());
+                collect_left_input(
+                    None,
+                    self.random_state.clone(),
+                    Arc::clone(&self.left),
+                    on_left.clone(),
+                    Arc::clone(&context),
+                    join_metrics.clone(),
+                    reservation,
+                    need_produce_result_in_final(self.join_type),
+                    self.right().output_partitioning().partition_count(),
+                )
+            }),
             PartitionMode::Partitioned => {
                 let reservation =
                     MemoryConsumer::new(format!("HashJoinInput[{partition}]"))
@@ -838,12 +808,9 @@ impl ExecutionPlan for HashJoinExec {
                     on_left.clone(),
                     Arc::clone(&context),
                     join_metrics.clone(),
-                    buffer_metrics.clone(),
                     reservation,
                     need_produce_result_in_final(self.join_type),
-                    probe_threads_count,
-                    context.runtime_env(),
-                    self.adaptive_options.clone(),
+                    1,
                 ))
             }
             PartitionMode::Auto => {
@@ -855,8 +822,6 @@ impl ExecutionPlan for HashJoinExec {
         };
 
         let batch_size = context.session_config().batch_size();
-
-        let runtime = Arc::clone(&context.runtime_env());
 
         // we have the batches and the hash map with their keys. We can how create a stream
         // over the right that uses this information to issue new batches.
@@ -873,7 +838,6 @@ impl ExecutionPlan for HashJoinExec {
 
         Ok(Box::pin(HashJoinStream {
             schema: self.schema(),
-            on_left,
             on_right,
             filter: self.filter.clone(),
             join_type: self.join_type,
@@ -887,10 +851,6 @@ impl ExecutionPlan for HashJoinExec {
             batch_size,
             hashes_buffer: vec![],
             right_side_ordered: self.right.output_ordering().is_some(),
-            probe_batch_partitioner: None,
-            probe_batches: None,
-            runtime,
-            probe_schedule: vec![],
         }))
     }
 
@@ -965,13 +925,10 @@ async fn collect_left_input(
     on_left: Vec<PhysicalExprRef>,
     context: Arc<TaskContext>,
     metrics: BuildProbeJoinMetrics,
-    buffer_metrics: BufferMetrics,
     reservation: MemoryReservation,
     with_visited_indices_bitmap: bool,
     probe_threads_count: usize,
-    runtime: Arc<RuntimeEnv>,
-    adaptive_options: Option<AdaptiveBufferOptions>,
-) -> Result<RwLock<(JoinLeftData, MaterializedBatches)>> {
+) -> Result<JoinLeftData> {
     let schema = left.schema();
 
     let (left_input, left_input_partition) = if let Some(partition) = partition {
@@ -983,51 +940,29 @@ async fn collect_left_input(
     };
 
     // Depending on partition argument load single partition or whole left side in memory
-    let mut stream = left_input.execute(left_input_partition, Arc::clone(&context))?;
+    let stream = left_input.execute(left_input_partition, Arc::clone(&context))?;
 
     // This operation performs 2 steps at once:
     // 1. creates a [JoinHashMap] of all batches from the stream
     // 2. stores the batches in a vector.
-    let mut memory_buffer = AdaptiveBuffer::try_new(
-        on_left.clone(),
-        runtime,
-        schema.clone(),
-        adaptive_options,
-    )?;
+    let initial = (Vec::new(), 0, metrics, reservation);
+    let (batches, num_rows, metrics, mut reservation) = stream
+        .try_fold(initial, |mut acc, batch| async {
+            let batch_size = get_record_batch_memory_size(&batch);
+            // Reserve memory for incoming batch
+            acc.3.try_grow(batch_size)?;
+            // Update metrics
+            acc.2.build_mem_used.add(batch_size);
+            acc.2.build_input_batches.add(1);
+            acc.2.build_input_rows.add(batch.num_rows());
+            // Update row count
+            acc.1 += batch.num_rows();
+            // Push batch to output
+            acc.0.push(batch);
+            Ok(acc)
+        })
+        .await?;
 
-    while let Some(batch) = stream.next().await {
-        memory_buffer.push(batch?)?;
-    }
-    let mut batches = memory_buffer.finalize(buffer_metrics)?;
-
-    metrics.build_mem_used.add(batches.mem_used());
-    metrics.build_input_batches.add(batches.num_batches());
-    metrics.build_input_rows.add(batches.num_rows());
-
-    build_join_left_data(
-        on_left,
-        random_state,
-        schema,
-        batches.take_mem_batches(),
-        metrics,
-        reservation,
-        with_visited_indices_bitmap,
-        probe_threads_count,
-    )
-    .map(|left_data| RwLock::new((left_data, batches)))
-}
-
-fn build_join_left_data(
-    on_left: Vec<PhysicalExprRef>,
-    random_state: RandomState,
-    schema: SchemaRef,
-    batches: Vec<RecordBatch>,
-    metrics: BuildProbeJoinMetrics,
-    mut reservation: MemoryReservation,
-    with_visited_indices_bitmap: bool,
-    probe_threads_count: usize,
-) -> Result<JoinLeftData> {
-    let num_rows = batches.iter().map(|b| b.num_rows()).sum();
     // Estimation of memory size, required for hashtable, prior to allocation.
     // Final result can be verified using `RawTable.allocation_info()`
     let fixed_size = size_of::<JoinHashMap>();
@@ -1152,13 +1087,13 @@ enum BuildSide {
 /// Container for BuildSide::Initial related data
 struct BuildSideInitialState {
     /// Future for building hash table from build-side input
-    left_fut: OnceFut<RwLock<(JoinLeftData, MaterializedBatches)>>,
+    left_fut: OnceFut<JoinLeftData>,
 }
 
 /// Container for BuildSide::Ready related data
 struct BuildSideReadyState {
     /// Collected build-side data
-    left_data: Arc<RwLock<(JoinLeftData, MaterializedBatches)>>,
+    left_data: Arc<JoinLeftData>,
 }
 
 impl BuildSide {
@@ -1215,29 +1150,10 @@ enum HashJoinStreamState {
     ProcessProbeBatch(ProcessProbeBatchState),
     /// Indicates that probe-side has been fully processed
     ExhaustedProbeSide,
-    /// Indicates that HashJoinStream completed processing the in-memory partitions
-    LoadNextPartition,
-    /// Indicates that HashJoinStream as fully completed processing data
-    Complete,
+    /// Indicates that HashJoinStream execution is completed
+    Completed,
 }
 
-///          ┌────────────────────────────WaitNextPartition─────┐    
-///          │                                ▲                 │    
-///          │                                │                 │    
-///          │                                │                 │    
-///          ▼                                │                 ▼    
-///     WaitBuildSide ◄────────────ProcessUnmatched─────────► Complete
-///          │                          ▲     │                      
-///          │                          │     │                      
-///          │                          │     │                      
-///          │                          │     │                      
-///          ▼                          │     │                      
-///     ┌─►FetchProbeBatch─────────►ExhaustedProbeSide                   
-///     │        │                                                       
-///     │        │                                                       
-///     │        ▼                                                       
-///     └──ProcessProbeBatch                  
-///                            
 impl HashJoinStreamState {
     /// Tries to extract ProcessProbeBatchState from HashJoinStreamState enum.
     /// Returns an error if state is not ProcessProbeBatchState.
@@ -1271,92 +1187,6 @@ impl ProcessProbeBatchState {
     }
 }
 
-struct ProbeBatchPartitioner {
-    schema: SchemaRef,
-    partitioner: BatchPartitioner,
-    spiller: Vec<Option<(RefCountedTempFile, IPCWriter)>>,
-}
-
-impl ProbeBatchPartitioner {
-    fn try_new(
-        expr: Vec<PhysicalExprRef>,
-        _random_state: RandomState,
-        schema: SchemaRef,
-        mask: Vec<bool>,
-        runtime: &RuntimeEnv,
-    ) -> Result<Self> {
-        let mut spiller = Vec::with_capacity(mask.len());
-        for id in 0..mask.len() {
-            if mask[id] {
-                let f = runtime.disk_manager.create_tmp_file("probe_spill")?;
-                let writer = IPCWriter::new(f.path(), &schema)?;
-                spiller.push(Some((f, writer)));
-            } else {
-                spiller.push(None);
-            }
-        }
-
-        Ok(Self {
-            schema,
-            partitioner: BatchPartitioner::try_new(
-                Partitioning::Hash(expr, mask.len()),
-                metrics::Time::new(),
-            )?,
-            spiller,
-        })
-    }
-
-    fn partition(&mut self, batch: RecordBatch) -> Result<RecordBatch> {
-        if self.spiller.iter().all(Option::is_none) {
-            return Ok(batch);
-        }
-
-        let mut in_memory = Vec::new();
-        for part in self.partitioner.partition_iter(batch)? {
-            let (id, batch) = part?;
-            match &mut self.spiller[id] {
-                Some(spiller) => {
-                    spiller.1.write(&batch)?;
-                }
-                None => {
-                    in_memory.push(batch);
-                }
-            }
-        }
-        Ok(concat_batches(&self.schema, &in_memory)?)
-    }
-
-    fn finalize(mut self) -> Result<MaterializedBatches> {
-        let mut materialized_partitions = Vec::new();
-        for spiller in self.spiller.drain(..) {
-            if let Some((file, mut writer)) = spiller {
-                writer.finish()?;
-
-                let mat_part = MaterializedPartition::Spilled {
-                    file,
-                    // TODO: add real metrics
-                    _metrics: PartitionMetrics::default(),
-                };
-
-                materialized_partitions.push(mat_part);
-            } else {
-                materialized_partitions.push(MaterializedPartition::InMemory {
-                    batches: vec![],
-                    // TODO: add real metrics
-                    _metrics: PartitionMetrics::default(),
-                });
-            }
-        }
-        Ok(MaterializedBatches::from_partitioned(
-            self.schema,
-            materialized_partitions,
-            // TODO: add real metrics
-            PartitionMetrics::default(),
-            PartitionMetrics::default(),
-        ))
-    }
-}
-
 /// [`Stream`] for [`HashJoinExec`] that does the actual join.
 ///
 /// This stream:
@@ -1368,8 +1198,6 @@ impl ProbeBatchPartitioner {
 struct HashJoinStream {
     /// Input schema
     schema: Arc<Schema>,
-    /// equijoin columns from the left (build side)
-    on_left: Vec<PhysicalExprRef>,
     /// equijoin columns from the right (probe side)
     on_right: Vec<PhysicalExprRef>,
     /// optional join filter
@@ -1396,13 +1224,6 @@ struct HashJoinStream {
     hashes_buffer: Vec<u64>,
     /// Specifies whether the right side has an ordering to potentially preserve
     right_side_ordered: bool,
-    /// Optional ProbeBatchPartitioner
-    probe_batch_partitioner: Option<ProbeBatchPartitioner>,
-    /// Optional Materialized Probe Batches
-    probe_batches: Option<MaterializedBatches>,
-    probe_schedule: Vec<usize>,
-    /// Runtime environment
-    runtime: Arc<RuntimeEnv>,
 }
 
 impl RecordBatchStream for HashJoinStream {
@@ -1572,10 +1393,7 @@ impl HashJoinStream {
                 HashJoinStreamState::ExhaustedProbeSide => {
                     handle_state!(self.process_unmatched_build_batch())
                 }
-                HashJoinStreamState::LoadNextPartition => {
-                    handle_state!(self.load_next_partition())
-                }
-                HashJoinStreamState::Complete => Poll::Ready(None),
+                HashJoinStreamState::Completed => Poll::Ready(None),
             };
         }
     }
@@ -1595,27 +1413,6 @@ impl HashJoinStream {
             .left_fut
             .get_shared(cx))?;
         build_timer.done();
-        {
-            let handle = left_data.read();
-
-            let mut mask = handle.1.spill_mask();
-
-            if let Some(mask) = &mut mask {
-                self.probe_schedule = mask
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &b)| b.then_some(i))
-                    .collect::<Vec<_>>();
-
-                self.probe_batch_partitioner = Some(ProbeBatchPartitioner::try_new(
-                    self.on_right.clone(),
-                    self.random_state.clone(),
-                    self.right.schema().clone(),
-                    std::mem::take(mask),
-                    &self.runtime,
-                )?);
-            }
-        }
 
         self.state = HashJoinStreamState::FetchProbeBatch;
         self.build_side = BuildSide::Ready(BuildSideReadyState { left_data });
@@ -1636,12 +1433,6 @@ impl HashJoinStream {
                 self.state = HashJoinStreamState::ExhaustedProbeSide;
             }
             Some(Ok(batch)) => {
-                let batch = if let Some(partitioner) = &mut self.probe_batch_partitioner {
-                    partitioner.partition(batch)?
-                } else {
-                    batch
-                };
-
                 // Precalculate hash values for fetched batch
                 let keys_values = self
                     .on_right
@@ -1678,15 +1469,13 @@ impl HashJoinStream {
     ) -> Result<StatefulStreamResult<Option<RecordBatch>>> {
         let state = self.state.try_as_process_probe_batch_mut()?;
         let build_side = self.build_side.try_as_ready_mut()?;
-        let left_data = build_side.left_data.read();
 
         let timer = self.join_metrics.join_time.timer();
 
-        let join_left_data = build_side.left_data.read();
         // get the matched by join keys indices
         let (left_indices, right_indices, next_offset) = lookup_join_hashmap(
-            join_left_data.0.hash_map(),
-            join_left_data.0.values(),
+            build_side.left_data.hash_map(),
+            build_side.left_data.values(),
             &state.values,
             self.null_equals_null,
             &self.hashes_buffer,
@@ -1697,7 +1486,7 @@ impl HashJoinStream {
         // apply join filter if exists
         let (left_indices, right_indices) = if let Some(filter) = &self.filter {
             apply_join_filter_to_indices(
-                build_side.left_data.read().0.batch(),
+                build_side.left_data.batch(),
                 &state.batch,
                 left_indices,
                 right_indices,
@@ -1710,7 +1499,7 @@ impl HashJoinStream {
 
         // mark joined left-side indices as visited, if required by join type
         if need_produce_result_in_final(self.join_type) {
-            let mut bitmap = left_data.0.visited_indices_bitmap().lock();
+            let mut bitmap = build_side.left_data.visited_indices_bitmap().lock();
             left_indices.iter().flatten().for_each(|x| {
                 bitmap.set_bit(x as usize, true);
             });
@@ -1757,7 +1546,7 @@ impl HashJoinStream {
 
         let result = build_batch_from_indices(
             &self.schema,
-            build_side.left_data.read().0.batch(),
+            build_side.left_data.batch(),
             &state.batch,
             &left_indices,
             &right_indices,
@@ -1791,23 +1580,26 @@ impl HashJoinStream {
         let timer = self.join_metrics.join_time.timer();
 
         if !need_produce_result_in_final(self.join_type) {
-            self.state = HashJoinStreamState::LoadNextPartition;
+            self.state = HashJoinStreamState::Completed;
             return Ok(StatefulStreamResult::Continue);
         }
 
         let build_side = self.build_side.try_as_ready()?;
-        let left_data = build_side.left_data.read();
+        if !build_side.left_data.report_probe_completed() {
+            self.state = HashJoinStreamState::Completed;
+            return Ok(StatefulStreamResult::Continue);
+        }
 
         // use the global left bitmap to produce the left indices and right indices
         let (left_side, right_side) = get_final_indices_from_shared_bitmap(
-            left_data.0.visited_indices_bitmap(),
+            build_side.left_data.visited_indices_bitmap(),
             self.join_type,
         );
         let empty_right_batch = RecordBatch::new_empty(self.right.schema());
         // use the left and right indices to produce the batch result
         let result = build_batch_from_indices(
             &self.schema,
-            left_data.0.batch(),
+            build_side.left_data.batch(),
             &empty_right_batch,
             &left_side,
             &right_side,
@@ -1824,61 +1616,9 @@ impl HashJoinStream {
         }
         timer.done();
 
-        self.state = HashJoinStreamState::LoadNextPartition;
+        self.state = HashJoinStreamState::Completed;
+
         Ok(StatefulStreamResult::Ready(Some(result?)))
-    }
-
-    fn load_next_partition(
-        &mut self,
-    ) -> Result<StatefulStreamResult<Option<RecordBatch>>> {
-        if !self.has_next_partition() {
-            self.state = HashJoinStreamState::Complete;
-            return Ok(StatefulStreamResult::Continue);
-        }
-
-        if let Some(probe_batch_partitioner) =
-            std::mem::take(&mut self.probe_batch_partitioner)
-        {
-            self.probe_batches = Some(probe_batch_partitioner.finalize()?);
-        }
-
-        let build_side = self.build_side.try_as_ready()?;
-        let mut left_data = build_side.left_data.write();
-
-        let part = self.probe_schedule.pop().unwrap();
-
-        if let Some(spill) = left_data.1.read_spill(part) {
-            let batches = spill?;
-            left_data.0 = build_join_left_data(
-                self.on_left.clone(),
-                self.random_state.clone(),
-                batches[0].schema().clone(),
-                batches,
-                self.join_metrics.clone(),
-                left_data.0._reservation.new_empty(),
-                need_produce_result_in_final(self.join_type),
-                1,
-            )?;
-        } else {
-            unreachable!();
-        }
-
-        if let Some(probe_batches) = &mut self.probe_batches {
-            if let Some(stream) = probe_batches.stream_spill(part) {
-                self.right = stream?;
-            } else {
-                unreachable!()
-            }
-        } else {
-            unreachable!()
-        }
-
-        self.state = HashJoinStreamState::FetchProbeBatch;
-        Ok(StatefulStreamResult::Continue)
-    }
-
-    fn has_next_partition(&self) -> bool {
-        !self.probe_schedule.is_empty()
     }
 }
 
@@ -1954,25 +1694,16 @@ mod tests {
         join_type: &JoinType,
         null_equals_null: bool,
     ) -> Result<HashJoinExec> {
-        let mut exec = HashJoinExec::try_new(
+        HashJoinExec::try_new(
             left,
             right,
             on,
             None,
             join_type,
             None,
-            PartitionMode::Partitioned,
+            PartitionMode::CollectLeft,
             null_equals_null,
-        )?;
-
-        exec = exec.with_adaptive_options(
-            AdaptiveBufferOptions::default()
-                .with_spill_threshold(usize::MAX)
-                .with_partition_threshold(1 << 16)
-                .with_start_partitioned(false),
-        );
-
-        Ok(exec)
+        )
     }
 
     fn join_with_filter(
@@ -1983,25 +1714,16 @@ mod tests {
         join_type: &JoinType,
         null_equals_null: bool,
     ) -> Result<HashJoinExec> {
-        let mut exec = HashJoinExec::try_new(
+        HashJoinExec::try_new(
             left,
             right,
             on,
             Some(filter),
             join_type,
             None,
-            PartitionMode::Partitioned,
+            PartitionMode::CollectLeft,
             null_equals_null,
-        )?;
-
-        exec = exec.with_adaptive_options(
-            AdaptiveBufferOptions::default()
-                .with_spill_threshold(usize::MAX)
-                .with_partition_threshold(1 << 16)
-                .with_start_partitioned(false),
-        );
-
-        Ok(exec)
+        )
     }
 
     async fn join_collect(
@@ -2352,7 +2074,6 @@ mod tests {
     }
 
     /// Test where the left has 2 parts, the right with 1 part => 1 part
-    #[ignore]
     #[apply(batch_sizes)]
     #[tokio::test]
     async fn join_inner_one_two_parts_left(batch_size: usize) -> Result<()> {
@@ -2422,7 +2143,6 @@ mod tests {
         Ok(())
     }
 
-    #[ignore]
     #[tokio::test]
     async fn join_inner_one_two_parts_left_randomly_ordered() -> Result<()> {
         let task_ctx = Arc::new(TaskContext::default());
@@ -2474,7 +2194,6 @@ mod tests {
     }
 
     /// Test where the left has 1 part, the right has 2 parts => 2 parts
-    #[ignore]
     #[apply(batch_sizes)]
     #[tokio::test]
     async fn join_inner_one_two_parts_right(batch_size: usize) -> Result<()> {
@@ -3998,7 +3717,7 @@ mod tests {
                 Arc::clone(&right),
                 on.clone(),
                 &join_type,
-                PartitionMode::Partitioned,
+                PartitionMode::CollectLeft,
                 false,
                 Arc::clone(&task_ctx),
             )
@@ -4489,73 +4208,5 @@ mod tests {
     /// Returns the column names on the schema
     fn columns(schema: &Schema) -> Vec<String> {
         schema.fields().iter().map(|f| f.name().clone()).collect()
-    }
-
-    fn build_three_part_table(
-        a: (&str, &Vec<i32>),
-        b: (&str, &Vec<i32>),
-        c: (&str, &Vec<i32>),
-    ) -> Arc<dyn ExecutionPlan> {
-        let batch = build_table_i32(a, b, c);
-        let schema = batch.schema();
-        Arc::new(
-            TestMemoryExec::try_new(
-                &[vec![batch.clone(), batch.clone(), batch]],
-                schema,
-                None,
-            )
-            .unwrap(),
-        )
-    }
-
-    #[tokio::test]
-    async fn join_inner_one_adaptive() -> Result<()> {
-        let task_ctx = prepare_task_ctx(8192);
-        let left = build_three_part_table(
-            ("a1", &vec![1, 2, 3]),
-            ("b1", &vec![4, 5, 5]), // this has a repetition
-            ("c1", &vec![7, 8, 9]),
-        );
-        let right = build_three_part_table(
-            ("a2", &vec![10, 20, 30]),
-            ("b1", &vec![4, 5, 6]),
-            ("c2", &vec![70, 80, 90]),
-        );
-
-        let on = vec![(
-            Arc::new(Column::new_with_schema("b1", &left.schema())?) as _,
-            Arc::new(Column::new_with_schema("b1", &right.schema())?) as _,
-        )];
-
-        let mut join = join(left, right, on, &JoinType::Inner, false)?;
-
-        join = join.with_adaptive_options(
-            AdaptiveBufferOptions::default()
-                .with_partition_value(4) // 4 partitions
-                .with_partition_threshold(2) // Batch 2 will be partitioned
-                .with_spill_threshold(5), // Batch 3 will be spilled
-        );
-
-        let columns = columns(&join.schema());
-
-        let stream = join.execute(0, task_ctx)?;
-        let batches = common::collect(stream).await?;
-
-        assert_eq!(columns, vec!["a1", "b1", "c1", "a2", "b1", "c2"]);
-
-        let expected = [
-            "+----+----+----+----+----+----+",
-            "| a1 | b1 | c1 | a2 | b1 | c2 |",
-            "+----+----+----+----+----+----+",
-            "| 1  | 4  | 7  | 10 | 4  | 70 |",
-            "| 2  | 5  | 8  | 20 | 5  | 80 |",
-            "| 3  | 5  | 9  | 20 | 5  | 80 |",
-            "+----+----+----+----+----+----+",
-        ];
-
-        // Inner join output is expected to preserve both inputs order
-        assert_batches_eq!(expected, &batches);
-
-        Ok(())
     }
 }
