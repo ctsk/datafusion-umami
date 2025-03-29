@@ -573,8 +573,10 @@ impl StreamFactory for GroupedHashAggregateStreamFactory {
 
     fn make(
         &self,
-        input: SendableRecordBatchStream,
+        mut input: Vec<SendableRecordBatchStream>,
     ) -> Result<SendableRecordBatchStream> {
+        let input = input.pop().unwrap();
+        
         let group_ordering = GroupOrdering::try_new(
             &self.group_schema,
             &self.input_order_mode,
