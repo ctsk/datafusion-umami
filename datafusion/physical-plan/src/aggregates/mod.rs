@@ -28,7 +28,7 @@ use crate::aggregates::{
 use crate::buffer::adaptive_buffer::AdaptiveBufferOptions;
 use crate::buffer::buffer_metrics::BufferMetrics;
 use crate::execution_plan::{CardinalityEffect, EmissionType};
-use crate::materialize::{AdaptiveMaterializeStream, StreamFactory};
+use crate::materialize::AdaptiveMaterializeStream;
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use crate::projection::get_field_metadata;
 use crate::windows::get_ordered_partition_by_indices;
