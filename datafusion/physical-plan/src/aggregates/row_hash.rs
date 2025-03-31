@@ -573,7 +573,7 @@ impl StreamFactory for GroupedHashAggregateStreamFactory {
 
     fn make(
         &self,
-        mut input: Vec<SendableRecordBatchStream>,
+        mut input: Vec<Box<dyn FnOnce() -> SendableRecordBatchStream + Send>>,
     ) -> Result<SendableRecordBatchStream> {
         let input = input.pop().unwrap();
         
@@ -609,7 +609,7 @@ impl StreamFactory for GroupedHashAggregateStreamFactory {
 
         Ok(Box::pin(GroupedHashAggregateStream {
             schema: self.schema.clone(),
-            input: input,
+            input: input(),
             mode: self.mode,
             aggregate_arguments: self.aggregate_arguments.clone(),
             filter_expressions: self.filter_expressions.clone(),

@@ -17,11 +17,12 @@
 
 //! [`HashJoinExec`] Partitioned Hash Join Operator
 
+use std::cell::{OnceCell, RefCell};
 use std::fmt;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::{any::Any, vec};
 
 use super::utils::{
@@ -337,6 +338,7 @@ pub struct HashJoinExec {
     /// For CollectLeft partition mode, all output streams share this cell to
     /// ensure the build side is computed exactly once, with the first accessing
     /// stream handling the initialization.
+    left_stream_holder: StreamHolder,
     left_once_cell: Arc<SharedResultOnceCell<JoinLeftData>>,
     /// Shared the `RandomState` for the hashing algorithm
     random_state: RandomState,
@@ -355,6 +357,76 @@ pub struct HashJoinExec {
     pub null_equals_null: bool,
     /// Cache holding plan properties like equivalences, output partitioning etc.
     cache: PlanProperties,
+}
+
+#[derive(Default)]
+struct StreamHolder(Arc<Mutex<HolderState>>);
+
+impl fmt::Debug for StreamHolder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamHolder").finish()
+    }
+}
+
+impl StreamHolder {
+    fn handle(&self) -> StreamHolder {
+        StreamHolder(Arc::clone(&self.0))
+    }
+
+    fn initialize(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<()> {
+        let mut handle = self.0.lock();
+
+        match &*handle {
+            HolderState::Init => match plan.execute(partition, context) {
+                Ok(left_stream) => {
+                    *handle = HolderState::Ready(left_stream);
+                    Ok(())
+                }
+                Err(datafusion_error) => {
+                    let shared_error = Arc::new(datafusion_error);
+                    *handle = HolderState::Error(Arc::clone(&shared_error));
+                    Err(DataFusionError::Shared(Arc::clone(&shared_error)))
+                }
+            },
+            HolderState::Error(data_fusion_error) => {
+                Err(DataFusionError::Shared(Arc::clone(data_fusion_error)))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn take(&self) -> SendableRecordBatchStream {
+        let mut handle = self.0.lock();
+
+        let state = std::mem::replace(&mut (*handle), HolderState::Taken);
+
+        match state {
+            HolderState::Init => {
+                panic!("StreamHolder found in an uninitialized state");
+            }
+            HolderState::Ready(pin) => pin,
+            HolderState::Error(_) => {
+                panic!("StreamHolder used despite error state");
+            }
+            HolderState::Taken => {
+                panic!("StreamHolder taken more than once");
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+enum HolderState {
+    #[default]
+    Init,
+    Ready(SendableRecordBatchStream),
+    Error(Arc<DataFusionError>),
+    Taken,
 }
 
 impl HashJoinExec {
@@ -408,6 +480,7 @@ impl HashJoinExec {
             filter,
             join_type: *join_type,
             join_schema,
+            left_stream_holder: Default::default(),
             left_once_cell: Default::default(),
             random_state,
             mode: partition_mode,
@@ -759,14 +832,20 @@ impl ExecutionPlan for HashJoinExec {
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let factory = self.execute_factory(partition, Arc::clone(&context))?;
-        let left_stream = if self.mode == PartitionMode::CollectLeft { 
+        let right_stream = self.right.execute(partition, Arc::clone(&context))?;
+
+        if self.mode == PartitionMode::CollectLeft {
             let left = coalesce_partitions_if_needed(Arc::clone(&self.left));
-            left.execute(0, Arc::clone(&context))?
+            self.left_stream_holder
+                .initialize(left, 0, Arc::clone(&context))?;
+
+            let handle = self.left_stream_holder.handle();
+            let left_producer = move || handle.take();
+            factory.make(vec![Box::new(left_producer), Box::new(|| right_stream)])
         } else {
-            self.left.execute(partition, Arc::clone(&context))?
-        };
-        let right_stream = self.right.execute(partition, context)?;
-        factory.make(vec![left_stream, right_stream])
+            let left_stream = self.left.execute(partition, Arc::clone(&context))?;
+            factory.make(vec![Box::new(|| left_stream), Box::new(|| right_stream)])
+        }
     }
 
     fn execute_factory(
@@ -921,7 +1000,7 @@ impl StreamFactory for HashJoinStreamFactory {
 
     fn make(
         &self,
-        mut input: Vec<SendableRecordBatchStream>,
+        mut input: Vec<Box<dyn FnOnce() -> SendableRecordBatchStream + Send>>,
     ) -> Result<SendableRecordBatchStream> {
         let right_stream = input.pop().unwrap();
         let left_stream = input.pop().unwrap();
@@ -942,7 +1021,7 @@ impl StreamFactory for HashJoinStreamFactory {
 
                     collect_left_input(
                         random_state,
-                        left_stream,
+                        left_stream(),
                         on_left,
                         join_metrics,
                         reservation,
@@ -961,7 +1040,7 @@ impl StreamFactory for HashJoinStreamFactory {
 
                 collect_left_input(
                     self.random_state.clone(),
-                    left_stream,
+                    left_stream(),
                     self.on_left.clone(),
                     self.join_metrics.clone(),
                     reservation,
@@ -981,7 +1060,7 @@ impl StreamFactory for HashJoinStreamFactory {
             on_right: self.on_right.clone(),
             filter: self.filter.clone(),
             join_type: self.join_type,
-            right: right_stream,
+            right: right_stream(),
             random_state: self.random_state.clone(),
             join_metrics: self.join_metrics.clone(),
             column_indices: self.column_indices.clone(),

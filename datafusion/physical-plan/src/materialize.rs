@@ -18,7 +18,7 @@ use crate::{
 
 pub trait StreamFactory {
     fn schema(&self) -> SchemaRef;
-    fn make(&self, input: Vec<SendableRecordBatchStream>)
+    fn make(&self, input: Vec<Box<dyn FnOnce() -> SendableRecordBatchStream + Send>>)
         -> Result<SendableRecordBatchStream>;
 }
 
@@ -86,8 +86,9 @@ impl AdaptiveMaterializeStream {
         let mut materialized = buffer.finalize(self.metrics.clone())?;
         let mem_batches = materialized.take_mem_batches();
         let mem_stream = MemoryStream::try_new(mem_batches, self.input.schema(), None)?;
-        let mut stream = self.stream_factory.make(vec![Box::pin(mem_stream)])?;
-
+        let producer: Box<dyn FnOnce() -> SendableRecordBatchStream + Send> = Box::new(move || Box::pin(mem_stream));
+        let inputs = vec![producer];
+        let mut stream = self.stream_factory.make(inputs)?;
         while let Some(batch) = stream.next().await {
             sink.yield_(Ok(batch?)).await;
         }
@@ -95,7 +96,9 @@ impl AdaptiveMaterializeStream {
         while let Some((_part, batches)) = materialized.take_next_spilled() {
             let batches = batches?;
             let mem_stream = MemoryStream::try_new(batches, self.input.schema(), None)?;
-            let mut stream = self.stream_factory.make(vec![Box::pin(mem_stream)])?;
+            let producer: Box<dyn FnOnce() -> SendableRecordBatchStream + Send> = Box::new(move || Box::pin(mem_stream));
+            let inputs = vec![producer];
+            let mut stream = self.stream_factory.make(inputs)?;
 
             while let Some(batch) = stream.next().await {
                 sink.yield_(Ok(batch?)).await
