@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{fs::File, io::BufReader, path::Path};
 
 use arrow::array::RecordBatch;
@@ -67,6 +68,15 @@ pub(crate) enum MaterializedPartition {
         file: RefCountedTempFile,
         _metrics: PartitionMetrics,
     },
+}
+
+impl Default for MaterializedPartition {
+    fn default() -> Self {
+        MaterializedPartition::InMemory { 
+            batches: Vec::new(), 
+            _metrics: PartitionMetrics::default()
+        }
+    }
 }
 
 impl std::fmt::Display for MaterializedPartition {
@@ -282,6 +292,10 @@ impl MaterializedBatches {
         } else {
             unreachable!()
         }
+    }
+
+    pub(crate) fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
     }
 }
 

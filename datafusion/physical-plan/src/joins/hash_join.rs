@@ -17,12 +17,11 @@
 
 //! [`HashJoinExec`] Partitioned Hash Join Operator
 
-use std::cell::{OnceCell, RefCell};
 use std::fmt;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::{any::Any, vec};
 
 use super::utils::{

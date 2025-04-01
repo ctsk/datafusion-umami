@@ -18,6 +18,7 @@
 //! Aggregates functionalities
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::{DisplayAs, ExecutionPlanProperties, PlanProperties};
@@ -28,7 +29,7 @@ use crate::aggregates::{
 use crate::buffer::adaptive_buffer::AdaptiveBufferOptions;
 use crate::buffer::buffer_metrics::BufferMetrics;
 use crate::execution_plan::{CardinalityEffect, EmissionType};
-use crate::materialize::AdaptiveMaterializeStream;
+use crate::materialize::{AdaptiveMaterializeStream, InputProto};
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use crate::projection::get_field_metadata;
 use crate::windows::get_ordered_partition_by_indices;
@@ -647,9 +648,8 @@ impl AggregateExec {
         let options = AdaptiveBufferOptions::default().with_start_partitioned(true);
         let stream = AdaptiveMaterializeStream::new(
             Box::new(factory),
-            input,
+            VecDeque::from([InputProto::new(input, expr)]),
             metrics,
-            expr,
             runtime_env,
             Some(options),
         );

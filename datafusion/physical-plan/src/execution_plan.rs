@@ -389,6 +389,9 @@ pub trait ExecutionPlan: Debug + DisplayAs + Send + Sync {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<Box<dyn StreamFactory + Send>> {
+        let _ = partition;
+        let _ = context;
+        
         unimplemented!("This execution plan's stream can not be reinstantiated.")
     }
 
