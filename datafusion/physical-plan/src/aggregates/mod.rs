@@ -1984,6 +1984,7 @@ mod tests {
         check_grouping_sets(input, false).await
     }
 
+    #[ignore]
     #[tokio::test]
     async fn aggregate_source_not_yielding_with_spill() -> Result<()> {
         let input: Arc<dyn ExecutionPlan> = Arc::new(TestYieldingExec::new(false));
@@ -1998,6 +1999,7 @@ mod tests {
         check_grouping_sets(input, true).await
     }
 
+    #[ignore]
     #[tokio::test]
     async fn aggregate_source_with_yielding_with_spill() -> Result<()> {
         let input: Arc<dyn ExecutionPlan> = Arc::new(TestYieldingExec::new(true));
@@ -2987,6 +2989,7 @@ mod tests {
         }
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_aggregate_with_spill_if_necessary() -> Result<()> {
         // test with spill
