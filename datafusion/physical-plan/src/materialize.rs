@@ -33,7 +33,7 @@ pub(crate) struct AdaptiveMaterializeStream {
     protos: VecDeque<InputProto>,
     metrics: BufferMetrics,
     runtime: Arc<RuntimeEnv>,
-    options: Option<AdaptiveBufferOptions>,
+    options: AdaptiveBufferOptions,
 }
 
 type Sink = genawaiter::sync::Co<Result<RecordBatch>>;
@@ -61,7 +61,7 @@ impl AdaptiveMaterializeStream {
         protos: VecDeque<InputProto>,
         metrics: BufferMetrics,
         runtime: Arc<RuntimeEnv>,
-        options: Option<AdaptiveBufferOptions>,
+        options: AdaptiveBufferOptions,
     ) -> Self {
         Self {
             stream_factory,
@@ -92,7 +92,7 @@ impl AdaptiveMaterializeStream {
             proto.expr.clone(),
             self.runtime.clone(),
             proto.input.schema(),
-            self.options.clone(),
+            Some(self.options.clone()),
         )
     }
 

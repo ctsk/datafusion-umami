@@ -392,6 +392,16 @@ config_namespace! {
         /// in joins can reduce memory usage when joining large
         /// tables with a highly-selective join filter, but is also slightly slower.
         pub enforce_batch_size_in_joins: bool, default = false
+
+        pub adaptive_buffer_enabled: bool, default = true
+
+        pub adaptive_buffer_start_partitioned: bool, default = false
+
+        pub adaptive_buffer_partition_threshold: usize, default = 1 << 16
+
+        pub adaptive_buffer_spill_threshold: usize, default = 1 << 17
+
+        pub adaptive_buffer_num_partitions: usize, default = 1 << 8
     }
 }
 

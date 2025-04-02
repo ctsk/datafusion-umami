@@ -645,13 +645,13 @@ impl AggregateExec {
         let metrics = BufferMetrics::new(partition, &self.metrics);
         let expr = self.group_by.input_exprs();
         let runtime_env = context.runtime_env();
-        let options = AdaptiveBufferOptions::default().with_start_partitioned(true);
+        let options = AdaptiveBufferOptions::from_config(&context.session_config().options().execution);
         let stream = AdaptiveMaterializeStream::new(
             Box::new(factory),
             VecDeque::from([InputProto::new(input, expr)]),
             metrics,
             runtime_env,
-            Some(options),
+            options,
         );
 
         Ok(StreamType::MaterializeGroupedHash(

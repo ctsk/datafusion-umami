@@ -31,6 +31,7 @@ use super::utils::{
     SharedResultPending,
 };
 use super::{PartitionMode, SharedBitmapBuilder};
+use crate::buffer::adaptive_buffer::AdaptiveBufferOptions;
 use crate::buffer::buffer_metrics::BufferMetrics;
 use crate::execution_plan::{boundedness_from_children, EmissionType};
 use crate::materialize::{AdaptiveMaterializeStream, InputProto, StreamFactory};
@@ -853,6 +854,7 @@ impl ExecutionPlan for HashJoinExec {
             factory.make(vec![Box::new(left_producer), Box::new(|| right_stream)])
         } else {
             let left_stream = self.left.execute(partition, Arc::clone(&context))?;
+            let options = AdaptiveBufferOptions::from_config(&context.session_config().options().execution);
 
             let stream = AdaptiveMaterializeStream::new(
                 factory,
@@ -862,7 +864,7 @@ impl ExecutionPlan for HashJoinExec {
                 ]),
                 BufferMetrics::new(partition, &self.metrics),
                 context.runtime_env(),
-                None,
+                options,
             );
 
             Ok(stream.stream())

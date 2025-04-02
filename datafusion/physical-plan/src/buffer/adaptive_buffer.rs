@@ -3,7 +3,7 @@ use std::{sync::Arc, usize};
 use crate::{common::IPCWriter, metrics, repartition::BatchPartitioner};
 use arrow::array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
-use datafusion_common::error::Result;
+use datafusion_common::{config::ExecutionOptions, error::Result};
 use datafusion_execution::{
     disk_manager::RefCountedTempFile, runtime_env::RuntimeEnv, SendableRecordBatchStream,
 };
@@ -48,6 +48,7 @@ impl Default for AdaptiveBufferOptions {
             start_partitioned: false,
         }
     }
+
 }
 
 impl AdaptiveBufferOptions {
@@ -73,6 +74,20 @@ impl AdaptiveBufferOptions {
 }
 
 impl AdaptiveBufferOptions {
+    pub(crate) fn from_config(config: &ExecutionOptions) -> Self {
+        if config.adaptive_buffer_enabled {
+            Self {
+                _page_grow_factor: 2,
+                partition_value: config.adaptive_buffer_num_partitions,
+                partition_threshold: config.adaptive_buffer_partition_threshold,
+                spill_threshold: config.adaptive_buffer_spill_threshold,
+                start_partitioned: config.adaptive_buffer_start_partitioned
+            }
+        } else {
+            Self::passive()
+        }
+    }
+
     pub fn passive() -> Self {
         Self::default()
             .with_partition_threshold(usize::MAX)
