@@ -278,9 +278,10 @@ impl AdaptiveBuffer {
     ) -> Result<Self> {
         let options = options.unwrap_or_default();
 
-        let partitioner = BatchPartitioner::try_new(
+        let partitioner = BatchPartitioner::try_new_with_seed(
             Partitioning::Hash(expr, options.partition_value),
             metrics::Time::new(),
+            ahash::RandomState::new(),
         )?;
 
         let state = Self::init_state(&options);

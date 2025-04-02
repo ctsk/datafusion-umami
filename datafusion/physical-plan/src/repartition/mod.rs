@@ -200,6 +200,10 @@ impl BatchPartitioner {
     ///
     /// The time spent repartitioning will be recorded to `timer`
     pub fn try_new(partitioning: Partitioning, timer: metrics::Time) -> Result<Self> {
+        Self::try_new_with_seed(partitioning, timer, ahash::RandomState::with_seeds(0, 0, 0, 0))
+    }
+
+    pub fn try_new_with_seed(partitioning: Partitioning, timer: metrics::Time, seed: ahash::RandomState) -> Result<Self> {
         let state = match partitioning {
             Partitioning::RoundRobinBatch(num_partitions) => {
                 BatchPartitionerState::RoundRobin {
@@ -211,7 +215,7 @@ impl BatchPartitioner {
                 exprs,
                 num_partitions,
                 // Use fixed random hash
-                random_state: ahash::RandomState::with_seeds(0, 0, 0, 0),
+                random_state: seed,
                 hash_buffer: vec![],
             },
             other => return not_impl_err!("Unsupported repartitioning scheme {other:?}"),
