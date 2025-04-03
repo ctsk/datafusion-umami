@@ -92,7 +92,7 @@ impl AdaptiveMaterializeStream {
             proto.expr.clone(),
             self.runtime.clone(),
             proto.input.schema(),
-            Some(self.options.clone()),
+            self.options.clone(),
         )
     }
 

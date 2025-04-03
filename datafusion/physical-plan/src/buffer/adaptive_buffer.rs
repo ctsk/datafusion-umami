@@ -38,18 +38,17 @@ pub struct AdaptiveBufferOptions {
     start_partitioned: bool,
 }
 
-impl Default for AdaptiveBufferOptions {
-    fn default() -> Self {
-        Self {
-            _page_grow_factor: 2,
-            partition_value: 256,
-            partition_threshold: 0,
-            spill_threshold: 1 << 20,
-            start_partitioned: false,
-        }
-    }
-
-}
+// impl Default for AdaptiveBufferOptions {
+//     fn default() -> Self {
+//         Self {
+//             _page_grow_factor: 2,
+//             partition_value: 256,
+//             partition_threshold: 0,
+//             spill_threshold: 1 << 20,
+//             start_partitioned: false,
+//         }
+//     }
+// }
 
 impl AdaptiveBufferOptions {
     pub fn with_partition_value(mut self, partition_value: usize) -> Self {
@@ -89,17 +88,13 @@ impl AdaptiveBufferOptions {
     }
 
     pub fn passive() -> Self {
-        Self::default()
-            .with_partition_threshold(usize::MAX)
-            .with_spill_threshold(usize::MAX)
-            .with_start_partitioned(false)
-    }
-
-    pub fn always_partition() -> Self {
-        Self::default()
-            .with_partition_threshold(0)
-            .with_spill_threshold(usize::MAX)
-            .with_start_partitioned(true)
+        Self {
+            _page_grow_factor: 2,
+            partition_value: 1,
+            partition_threshold: usize::MAX,
+            spill_threshold: usize::MAX,
+            start_partitioned: false
+        }
     }
 }
 
@@ -274,10 +269,8 @@ impl AdaptiveBuffer {
         expr: Vec<PhysicalExprRef>,
         runtime: Arc<RuntimeEnv>,
         schema: SchemaRef,
-        options: Option<AdaptiveBufferOptions>,
+        options: AdaptiveBufferOptions,
     ) -> Result<Self> {
-        let options = options.unwrap_or_default();
-
         let partitioner = BatchPartitioner::try_new_with_seed(
             Partitioning::Hash(expr, options.partition_value),
             metrics::Time::new(),
@@ -529,7 +522,7 @@ mod tests {
             vec![col("a", &schema)?],
             runtime_env,
             schema,
-            Some(options),
+            options,
         )?;
 
         let expected = [4, 20, 1008];
