@@ -66,21 +66,16 @@ pub struct CommonOpt {
 impl CommonOpt {
     /// Return an appropriately configured `SessionConfig`
     pub fn config(&self) -> SessionConfig {
-        self.update_config(SessionConfig::new())
+        self.update_config(SessionConfig::from_env().expect("Could not read config from environment"))
     }
 
     /// Modify the existing config appropriately
-    pub fn update_config(&self, config: SessionConfig) -> SessionConfig {
-        let mut config = config
-            .with_target_partitions(
-                self.partitions.unwrap_or(get_available_parallelism()),
-            )
-            .with_batch_size(self.batch_size);
-        if let Some(sort_spill_reservation_bytes) = self.sort_spill_reservation_bytes {
-            config =
-                config.with_sort_spill_reservation_bytes(sort_spill_reservation_bytes);
+    pub fn update_config(&self, mut config: SessionConfig) -> SessionConfig {
+        if let Some(target_partitions) = self.partitions {
+            config = config.with_target_partitions(target_partitions)
         }
-        config
+
+        config.with_batch_size(self.batch_size)
     }
 
     /// Return an appropriately configured `RuntimeEnvBuilder`
