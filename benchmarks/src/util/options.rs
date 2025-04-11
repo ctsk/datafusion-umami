@@ -25,7 +25,7 @@ use datafusion::{
     },
     prelude::SessionConfig,
 };
-use datafusion_common::{utils::get_available_parallelism, DataFusionError, Result};
+use datafusion_common::{DataFusionError, Result};
 use structopt::StructOpt;
 
 // Common benchmark options (don't use doc comments otherwise this doc
