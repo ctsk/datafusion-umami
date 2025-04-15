@@ -80,7 +80,7 @@ impl AdaptiveBufferOptions {
                 partition_value: config.adaptive_buffer_num_partitions,
                 partition_threshold: config.adaptive_buffer_partition_threshold,
                 spill_threshold: config.adaptive_buffer_spill_threshold,
-                start_partitioned: config.adaptive_buffer_start_partitioned
+                start_partitioned: config.adaptive_buffer_start_partitioned,
             }
         } else {
             Self::passive()
@@ -93,7 +93,7 @@ impl AdaptiveBufferOptions {
             partition_value: 1,
             partition_threshold: usize::MAX,
             spill_threshold: usize::MAX,
-            start_partitioned: false
+            start_partitioned: false,
         }
     }
 }
@@ -173,6 +173,7 @@ impl Partition {
                 for batch in batches {
                     self.metrics.retract(&batch);
                     self.spilled_metrics.update(&batch);
+                    let batch = utils::gc(batch)?;
                     writer.write(&batch)?;
                 }
 
@@ -198,6 +199,7 @@ impl Partition {
             }
             PartitionState::Spilling { writer, file: _ } => {
                 self.spilled_metrics.update(&batch);
+                let batch = utils::gc(&batch)?;
                 writer.write(&batch)
             }
         }
@@ -485,6 +487,29 @@ impl AdaptiveBuffer {
         }
 
         Ok(())
+    }
+}
+
+mod utils {
+    use arrow::array::StringViewArray;
+
+    use super::*;
+    
+    pub(super) fn gc(batch: &RecordBatch) -> Result<RecordBatch> {
+        let schema = batch.schema();
+        let columns = batch
+            .columns()
+            .iter()
+            .map(|array| {
+                if let Some(array) = array.as_any().downcast_ref::<StringViewArray>() {
+                    Arc::new(array.gc()) as _ 
+                } else {
+                    Arc::clone(&array)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok(RecordBatch::try_new(schema, columns)?)
     }
 }
 
