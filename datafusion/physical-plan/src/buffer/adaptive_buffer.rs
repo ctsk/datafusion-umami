@@ -342,6 +342,7 @@ impl AdaptiveBuffer {
         mut self,
         metrics: BufferMetrics,
     ) -> Result<MaterializedBatches> {
+        log::debug!("Finalizing adaptive buffer.");
         match self.state {
             State::Standard { batches } => {
                 metrics.unpartitioned.add(&self.totals);
