@@ -226,9 +226,12 @@ impl MaterializedBatches {
     fn read_spill_batches(path: &Path) -> Result<Vec<RecordBatch>> {
         let file = BufReader::new(File::open(path)?);
         let reader = FileReader::try_new(file, None)?;
-        reader
-            .collect::<std::result::Result<Vec<_>, arrow::error::ArrowError>>()
-            .map_err(|e| e.into())
+        let batches = reader
+            .collect::<std::result::Result<Vec<_>, arrow::error::ArrowError>>()?;
+        
+        log::debug!("Read {} spilled batches ({} rows)", batches.len(), batches.iter().map(|b| b.num_rows()).sum::<usize>());
+        
+        Ok(batches)
     }
 
     #[allow(dead_code)]

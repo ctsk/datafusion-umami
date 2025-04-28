@@ -121,6 +121,8 @@ impl AdaptiveMaterializeStream {
         let mut materialized = self.buffer_blocking(blocking).await?;
         let spill_mask = materialized.spill_mask();
 
+        log::debug!("AdaptiveMaterializeStream: done buffering. {:?}", self.metrics);
+
         let spill_mask = match spill_mask {
             None => {
                 // No spilling occured => We only need to process memory batches.
