@@ -329,7 +329,7 @@ mod utils {
 
     fn read_spill(sender: Sender<Result<RecordBatch>>, path: &Path) -> Result<()> {
         let file = BufReader::new(File::open(path)?);
-        let reader = FileReader::try_new(file, None)?;
+        let reader = unsafe { FileReader::try_new(file, None)?.with_skip_validation(true) };
         for batch in reader {
             sender
                 .blocking_send(batch.map_err(Into::into))
