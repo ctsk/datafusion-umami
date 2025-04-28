@@ -1,7 +1,7 @@
-use std::{sync::Arc, usize};
+use std::{os::unix::fs::OpenOptionsExt, sync::Arc, usize};
 
-use crate::{common::IPCWriter, metrics, repartition::BatchPartitioner};
-use arrow::array::RecordBatch;
+use crate::{common::IPCWriter, metrics, repartition::BatchPartitioner, spill};
+use arrow::{array::RecordBatch, ipc::writer::FileWriter};
 use arrow_schema::{Schema, SchemaRef};
 use datafusion_common::{config::ExecutionOptions, error::Result};
 use datafusion_execution::{
@@ -104,7 +104,7 @@ enum PartitionState {
     },
     Spilling {
         file: RefCountedTempFile,
-        writer: IPCWriter,
+        writer: FileWriter<std::io::BufWriter<std::fs::File>>,
     },
 }
 
@@ -132,8 +132,8 @@ impl std::fmt::Debug for PartitionState {
             PartitionState::InMemory { batches } => {
                 write!(f, "InMemory({:?})", batches)
             }
-            PartitionState::Spilling { writer, file: _ } => {
-                write!(f, "Spilling({})", writer.path.display())
+            PartitionState::Spilling { writer: _, file } => {
+                write!(f, "Spilling({:?})", file.path())
             }
         }
     }
@@ -168,7 +168,10 @@ impl Partition {
         match &self.state {
             PartitionState::InMemory { batches } => {
                 let spill_file = runtime.disk_manager.create_tmp_file(&SPILL_ID)?;
-                let mut writer = IPCWriter::new(spill_file.path(), schema)?;
+                let file = std::fs::File::options().custom_flags(0x4000).write(true).open(spill_file.path())?;
+                let mut writer = FileWriter::try_new_buffered(file, schema)?;
+                // let mut writer = FileWriter::try_new_buffered(writer, schema);
+                // let mut writer = IPCWriter::new(spill_file.path(), schema)?;
 
                 for batch in batches {
                     self.metrics.retract(&batch);
@@ -200,7 +203,7 @@ impl Partition {
             PartitionState::Spilling { writer, file: _ } => {
                 self.spilled_metrics.update(&batch);
                 let batch = utils::gc(&batch)?;
-                writer.write(&batch)
+                Ok(writer.write(&batch)?)
             }
         }
     }
