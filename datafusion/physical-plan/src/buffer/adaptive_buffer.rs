@@ -168,15 +168,14 @@ impl Partition {
         match &self.state {
             PartitionState::InMemory { batches } => {
                 let spill_file = runtime.disk_manager.create_tmp_file(&SPILL_ID)?;
-                let file = std::fs::File::options().custom_flags(0x4000).write(true).open(spill_file.path())?;
+                let file = std::fs::File::options().write(true).open(spill_file.path())?;
                 let mut writer = FileWriter::try_new_buffered(file, schema)?;
-                // let mut writer = FileWriter::try_new_buffered(writer, schema);
-                // let mut writer = IPCWriter::new(spill_file.path(), schema)?;
 
                 for batch in batches {
                     self.metrics.retract(&batch);
                     self.spilled_metrics.update(&batch);
                     let batch = utils::gc(batch)?;
+                    log::debug!("Writing {} rows to part {} @ {:?}", batch.num_rows(), self.id, spill_file.path());
                     writer.write(&batch)?;
                 }
 
@@ -200,9 +199,10 @@ impl Partition {
                 batches.push(batch);
                 Ok(())
             }
-            PartitionState::Spilling { writer, file: _ } => {
+            PartitionState::Spilling { writer, file } => {
                 self.spilled_metrics.update(&batch);
                 let batch = utils::gc(&batch)?;
+                log::debug!("Writing {} rows to part {} @ {:?}", batch.num_rows(), self.id, file.path());
                 Ok(writer.write(&batch)?)
             }
         }

@@ -331,6 +331,9 @@ mod utils {
         let file = BufReader::new(File::open(path)?);
         let reader = unsafe { FileReader::try_new(file, None)?.with_skip_validation(true) };
         for batch in reader {
+            if let Ok(ref batch) = batch {
+                log::debug!("Read {} rows from {:?}", batch.num_rows(), path);
+            }
             sender
                 .blocking_send(batch.map_err(Into::into))
                 .map_err(|e| exec_datafusion_err!("{e}"))?;
