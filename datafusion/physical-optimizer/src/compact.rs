@@ -6,7 +6,7 @@ use datafusion_common::{
 use datafusion_physical_plan::{
     aggregates::AggregateExec, coalesce_batches::CoalesceBatchesExec,
     compact::CompactExec, execution_plan::CardinalityEffect, joins::HashJoinExec,
-    repartition::RepartitionExec, ExecutionPlan,
+    repartition::RepartitionExec, sorts::sort::SortExec, ExecutionPlan,
 };
 
 use crate::PhysicalOptimizerRule;
@@ -68,6 +68,16 @@ impl PhysicalOptimizerRule for CompactBatches {
 
             if let Some(agg) = root.as_any().downcast_ref::<AggregateExec>() {
                 let input = rec(Arc::clone(&agg.input()), true, compact_threshold)?;
+
+                return if input.transformed {
+                    Ok(Transformed::yes(root.with_new_children(vec![input.data])?))
+                } else {
+                    Ok(Transformed::no(root))
+                };
+            }
+
+            if let Some(sort) = root.as_any().downcast_ref::<SortExec>() {
+                let input = rec(Arc::clone(&sort.input()), true, compact_threshold)?;
 
                 return if input.transformed {
                     Ok(Transformed::yes(root.with_new_children(vec![input.data])?))
