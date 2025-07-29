@@ -64,6 +64,7 @@ use datafusion::physical_plan::aggregates::{AggregateExec, PhysicalGroupBy};
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::compact::CompactExec;
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::empty::EmptyExec;
 use datafusion::physical_plan::explain::ExplainExec;
@@ -331,6 +332,12 @@ impl AsExecutionPlan for protobuf::PhysicalPlanNode {
                     runtime,
                     extension_codec,
                 ),
+            PhysicalPlanType::Compact(compact) => self.try_into_compact_physical_plan(
+                compact,
+                registry,
+                runtime,
+                extension_codec,
+            ),
         }
     }
 
@@ -522,6 +529,13 @@ impl AsExecutionPlan for protobuf::PhysicalPlanNode {
 
         if let Some(exec) = plan.downcast_ref::<CooperativeExec>() {
             return protobuf::PhysicalPlanNode::try_from_cooperative_exec(
+                exec,
+                extension_codec,
+            );
+        }
+
+        if let Some(exec) = plan.downcast_ref::<CompactExec>() {
+            return protobuf::PhysicalPlanNode::try_from_compact_exec(
                 exec,
                 extension_codec,
             );
@@ -1839,6 +1853,18 @@ impl protobuf::PhysicalPlanNode {
         Ok(Arc::new(CooperativeExec::new(input)))
     }
 
+    fn try_into_compact_physical_plan(
+        &self,
+        compact: &protobuf::CompactExecNode,
+        registry: &dyn FunctionRegistry,
+        runtime: &RuntimeEnv,
+        extension_codec: &dyn PhysicalExtensionCodec,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let input: Arc<dyn ExecutionPlan> =
+            into_physical_plan(&compact.input, registry, runtime, extension_codec)?;
+        Ok(Arc::new(CompactExec::new(compact.threshold, input)))
+    }
+
     fn try_from_explain_exec(
         exec: &ExplainExec,
         _extension_codec: &dyn PhysicalExtensionCodec,
@@ -2834,6 +2860,24 @@ impl protobuf::PhysicalPlanNode {
             physical_plan_type: Some(PhysicalPlanType::Cooperative(Box::new(
                 protobuf::CooperativeExecNode {
                     input: Some(Box::new(input)),
+                },
+            ))),
+        })
+    }
+
+    fn try_from_compact_exec(
+        compact: &CompactExec,
+        extension_codec: &dyn PhysicalExtensionCodec,
+    ) -> Result<Self> {
+        let input = protobuf::PhysicalPlanNode::try_from_physical_plan(
+            compact.input().to_owned(),
+            extension_codec,
+        )?;
+        Ok(protobuf::PhysicalPlanNode {
+            physical_plan_type: Some(PhysicalPlanType::Compact(Box::new(
+                protobuf::CompactExecNode {
+                    input: Some(Box::new(input)),
+                    threshold: compact.threshold(),
                 },
             ))),
         })

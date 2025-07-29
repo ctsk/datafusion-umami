@@ -605,7 +605,7 @@ message WindowFrame {
   // "optional" keyword is stable in protoc 3.15 but prost is still on 3.14 (see https://github.com/tokio-rs/prost/issues/430 and https://github.com/tokio-rs/prost/pull/455)
   // this syntax is ugly but is binary compatible with the "optional" keyword (see https://stackoverflow.com/questions/42622015/how-to-define-an-optional-field-in-protobuf-3)
   oneof end_bound {
-    WindowFrameBound bound = 3;
+    WindowFrameBound bound = 4;
   }
 }
 
@@ -727,6 +727,7 @@ message PhysicalPlanNode {
     UnnestExecNode unnest = 30;
     JsonScanExecNode json_scan = 31;
     CooperativeExecNode cooperative = 32;
+    CompactExecNode compact = 33;
   }
 }
 
@@ -1223,6 +1224,11 @@ message CoalesceBatchesExecNode {
 message CoalescePartitionsExecNode {
   PhysicalPlanNode input = 1;
   optional uint32 fetch = 2;
+}
+
+message CompactExecNode {
+  PhysicalPlanNode input = 1;
+  float threshold = 2;
 }
 
 message PhysicalHashRepartition {

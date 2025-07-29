@@ -916,7 +916,7 @@ pub struct WindowFrame {
     pub start_bound: ::core::option::Option<WindowFrameBound>,
     /// "optional" keyword is stable in protoc 3.15 but prost is still on 3.14 (see <https://github.com/tokio-rs/prost/issues/430> and <https://github.com/tokio-rs/prost/pull/455>)
     /// this syntax is ugly but is binary compatible with the "optional" keyword (see <https://stackoverflow.com/questions/42622015/how-to-define-an-optional-field-in-protobuf-3>)
-    #[prost(oneof = "window_frame::EndBound", tags = "3")]
+    #[prost(oneof = "window_frame::EndBound", tags = "4")]
     pub end_bound: ::core::option::Option<window_frame::EndBound>,
 }
 /// Nested message and enum types in `WindowFrame`.
@@ -925,7 +925,7 @@ pub mod window_frame {
     /// this syntax is ugly but is binary compatible with the "optional" keyword (see <https://stackoverflow.com/questions/42622015/how-to-define-an-optional-field-in-protobuf-3>)
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum EndBound {
-        #[prost(message, tag = "3")]
+        #[prost(message, tag = "4")]
         Bound(super::WindowFrameBound),
     }
 }
@@ -1048,7 +1048,7 @@ pub mod table_reference {
 pub struct PhysicalPlanNode {
     #[prost(
         oneof = "physical_plan_node::PhysicalPlanType",
-        tags = "1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32"
+        tags = "1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33"
     )]
     pub physical_plan_type: ::core::option::Option<physical_plan_node::PhysicalPlanType>,
 }
@@ -1120,6 +1120,8 @@ pub mod physical_plan_node {
         JsonScan(super::JsonScanExecNode),
         #[prost(message, tag = "32")]
         Cooperative(::prost::alloc::boxed::Box<super::CooperativeExecNode>),
+        #[prost(message, tag = "33")]
+        Compact(::prost::alloc::boxed::Box<super::CompactExecNode>),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1833,6 +1835,13 @@ pub struct CoalescePartitionsExecNode {
     pub input: ::core::option::Option<::prost::alloc::boxed::Box<PhysicalPlanNode>>,
     #[prost(uint32, optional, tag = "2")]
     pub fetch: ::core::option::Option<u32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CompactExecNode {
+    #[prost(message, optional, boxed, tag = "1")]
+    pub input: ::core::option::Option<::prost::alloc::boxed::Box<PhysicalPlanNode>>,
+    #[prost(float, tag = "2")]
+    pub threshold: f32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PhysicalHashRepartition {

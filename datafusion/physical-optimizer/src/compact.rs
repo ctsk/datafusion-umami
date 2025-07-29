@@ -47,7 +47,7 @@ impl PhysicalOptimizerRule for CompactBatches {
         fn rec(
             root: Arc<dyn ExecutionPlan>,
             compact_needed: bool,
-            compact_threshold: f64,
+            compact_threshold: f32,
         ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
             // todo: Move compaction into hash join: Different compaction strategy for build / probe side columns
             if let Some(hj) = root.as_any().downcast_ref::<HashJoinExec>() {
@@ -126,7 +126,7 @@ impl PhysicalOptimizerRule for CompactBatches {
             }
         }
 
-        rec(plan, false, config.execution.compact_threshold).data()
+        rec(plan, false, config.execution.compact_threshold as f32).data()
     }
 
     fn name(&self) -> &str {

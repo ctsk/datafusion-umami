@@ -29,7 +29,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct CompactExec {
-    compact_threshold: f64,
+    compact_threshold: f32,
     metrics: ExecutionPlanMetricsSet,
     cache: PlanProperties,
     input: Arc<dyn ExecutionPlan>,
@@ -61,7 +61,7 @@ impl DisplayAs for CompactExec {
 }
 
 impl CompactExec {
-    pub fn new(compact_threshold: f64, input: Arc<dyn ExecutionPlan>) -> Self {
+    pub fn new(compact_threshold: f32, input: Arc<dyn ExecutionPlan>) -> Self {
         let cache = Self::compute_properties(&input);
 
         Self {
@@ -83,6 +83,14 @@ impl CompactExec {
             input.pipeline_behavior(),
             input.boundedness(),
         )
+    }
+
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+
+    pub fn threshold(&self) -> f32 {
+        self.compact_threshold
     }
 }
 
@@ -172,7 +180,7 @@ impl ExecutionPlan for CompactExec {
 struct CompactStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
-    compact_threshold: f64,
+    compact_threshold: f32,
     metrics: BaselineMetrics,
 }
 
@@ -202,7 +210,7 @@ impl Stream for CompactStream {
 }
 
 fn compact_view_column<T: ByteViewType>(
-    threshold: f64,
+    threshold: f32,
     array: &GenericByteViewArray<T>,
 ) -> Option<ArrayRef> {
     const INLINE_THRESHOLD: u32 = 12;
@@ -227,7 +235,7 @@ fn compact_view_column<T: ByteViewType>(
     let actual_buffer_size: usize =
         array.data_buffers().iter().map(|buf| buf.capacity()).sum();
 
-    if actual_buffer_size as f64 > ideal_buffer_size as f64 * threshold {
+    if actual_buffer_size as f32 > ideal_buffer_size as f32 * threshold {
         // todo: request APIs from arrow-rs to obtain a mutable downcasted array
         // ... so we can reuse the data buffers of the column here.
         // until then: out of place :(
@@ -256,7 +264,7 @@ fn compact_view_column<T: ByteViewType>(
     }
 }
 
-fn compact(threshold: f64, batch: RecordBatch) -> RecordBatch {
+fn compact(threshold: f32, batch: RecordBatch) -> RecordBatch {
     let compact_column = |column: ArrayRef| -> ArrayRef {
         if let Some(string_view_array) = column.as_string_view_opt() {
             return compact_view_column(threshold, string_view_array).unwrap_or(column);
