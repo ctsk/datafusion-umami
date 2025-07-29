@@ -3,6 +3,7 @@ use datafusion_common::{
     tree_node::{Transformed, TransformedResult, TreeNode},
     Result,
 };
+use datafusion_expr::JoinType;
 use datafusion_physical_plan::{
     aggregates::AggregateExec, coalesce_batches::CoalesceBatchesExec,
     compact::CompactExec, execution_plan::CardinalityEffect, joins::HashJoinExec,
@@ -48,10 +49,21 @@ impl PhysicalOptimizerRule for CompactBatches {
             compact_needed: bool,
             compact_threshold: f64,
         ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
-            // todo: Move compaction into hash join: Different compaction strategy for build / probe side
+            // todo: Move compaction into hash join: Different compaction strategy for build / probe side columns
             if let Some(hj) = root.as_any().downcast_ref::<HashJoinExec>() {
                 let left = rec(Arc::clone(&hj.left()), true, compact_threshold)?;
-                let right = rec(Arc::clone(&hj.right()), false, compact_threshold)?;
+
+                let right_compact_needed = compact_needed
+                    && !matches!(
+                        hj.join_type(),
+                        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark
+                    );
+
+                let right = rec(
+                    Arc::clone(&hj.right()),
+                    right_compact_needed,
+                    compact_threshold,
+                )?;
 
                 return if left.transformed || right.transformed {
                     Ok(Transformed::yes(Arc::new(CompactExec::new(
@@ -59,10 +71,16 @@ impl PhysicalOptimizerRule for CompactBatches {
                         root.with_new_children(vec![left.data, right.data])?,
                     ))))
                 } else {
-                    Ok(Transformed::yes(Arc::new(CompactExec::new(
-                        compact_threshold,
-                        root,
-                    ))))
+                    if compact_needed {
+                        Ok(Transformed::yes(Arc::new(CompactExec::new(
+                            compact_threshold,
+                            root,
+                        ))))
+                    } else {
+                        Ok(Transformed::no(
+                            root.with_new_children(vec![left.data, right.data])?,
+                        ))
+                    }
                 };
             }
 
@@ -96,12 +114,16 @@ impl PhysicalOptimizerRule for CompactBatches {
             }
 
             let new_root =
-                root.map_children(|child| rec(child, false, compact_threshold));
+                root.map_children(|child| rec(child, false, compact_threshold))?;
 
-            Ok(Transformed::yes(Arc::new(CompactExec::new(
-                compact_threshold,
-                new_root.data()?,
-            ))))
+            if compact_needed {
+                Ok(Transformed::yes(Arc::new(CompactExec::new(
+                    compact_threshold,
+                    new_root.data,
+                ))))
+            } else {
+                Ok(new_root)
+            }
         }
 
         rec(plan, false, config.execution.compact_threshold).data()
