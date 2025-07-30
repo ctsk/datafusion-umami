@@ -15,10 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow::array::RecordBatch;
+use arrow::array::{ArrayRef, AsArray, GenericByteViewArray, RecordBatch};
 use arrow::compute::concat_batches;
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{ByteViewType, SchemaRef};
 use std::sync::Arc;
+
+use crate::common::compact_column;
 
 /// Concatenate multiple [`RecordBatch`]es
 ///
@@ -168,6 +170,7 @@ impl BatchCoalescer {
     /// Concatenates and returns all buffered batches, and clears the buffer.
     pub fn finish_batch(&mut self) -> datafusion_common::Result<RecordBatch> {
         let batch = concat_batches(&self.schema, &self.buffer)?;
+        let batch = limit_view_buffers(batch);
         self.buffer.clear();
         self.buffered_rows = 0;
         Ok(batch)
@@ -193,6 +196,42 @@ pub enum CoalescerState {
     /// Action: call [`BatchCoalescer::finish_batch()`] to get the current
     /// buffered results as a batch and then continue pushing batches.
     TargetReached,
+}
+
+fn needs_compact<T: ByteViewType>(array: &GenericByteViewArray<T>) -> bool {
+    const VIEW_BUFFERS_LIMIT: usize = 32;
+    array.data_buffers().len() <= VIEW_BUFFERS_LIMIT
+}
+
+/// Arrow-rs currently does not handle view columns with large view buffers well.
+/// This method compacts to check
+///
+/// Reevaluate
+fn limit_view_buffers(batch: RecordBatch) -> RecordBatch {
+    let limit_column = |column: ArrayRef| -> ArrayRef {
+        if let Some(string_view_array) = column.as_string_view_opt() {
+            return if needs_compact(string_view_array) {
+                compact_column(0.0, column)
+            } else {
+                column
+            };
+        }
+
+        if let Some(bin_view_array) = column.as_binary_view_opt() {
+            return if needs_compact(bin_view_array) {
+                compact_column(0.0, column)
+            } else {
+                column
+            };
+        }
+
+        column
+    };
+
+    let (schema, columns, row_count) = batch.into_parts();
+    let columns = columns.into_iter().map(limit_column).collect();
+
+    unsafe { RecordBatch::new_unchecked(schema, columns, row_count) }
 }
 
 #[cfg(test)]

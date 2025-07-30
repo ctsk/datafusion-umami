@@ -25,8 +25,10 @@ use super::SendableRecordBatchStream;
 use crate::stream::RecordBatchReceiverStream;
 use crate::{ColumnStatistics, Statistics};
 
-use arrow::array::Array;
-use arrow::datatypes::Schema;
+use arrow::array::{
+    Array, ArrayRef, AsArray, ByteView, GenericByteViewArray, GenericByteViewBuilder,
+};
+use arrow::datatypes::{ByteViewType, Schema};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::stats::Precision;
 use datafusion_common::{plan_err, Result};
@@ -202,6 +204,81 @@ pub fn can_project(
         }
         None => Ok(()),
     }
+}
+
+fn compact_view_column<T: ByteViewType>(
+    threshold: f32,
+    array: &GenericByteViewArray<T>,
+) -> Option<ArrayRef> {
+    const INLINE_THRESHOLD: u32 = 12;
+
+    if array.data_buffers().is_empty() {
+        return None;
+    }
+
+    let ideal_buffer_size: usize = array
+        .views()
+        .iter()
+        .map(|view| {
+            let byte_view = ByteView::from(*view);
+            if byte_view.length > INLINE_THRESHOLD {
+                byte_view.length as usize
+            } else {
+                0
+            }
+        })
+        .sum();
+
+    let actual_buffer_size: usize =
+        array.data_buffers().iter().map(|buf| buf.capacity()).sum();
+
+    if actual_buffer_size as f32 > ideal_buffer_size as f32 * threshold {
+        // todo: request APIs from arrow-rs to obtain a mutable downcasted array
+        // ... so we can reuse the data buffers of the column here.
+        // until then: out of place :(
+
+        // No data buffers are needed => Drop them all
+        if ideal_buffer_size == 0 {
+            return Some(Arc::new(unsafe {
+                GenericByteViewArray::<T>::new_unchecked(
+                    array.views().clone(),
+                    vec![],
+                    array.nulls().cloned(),
+                )
+            }));
+        }
+
+        let mut builder = GenericByteViewBuilder::<T>::with_capacity(array.len())
+            .with_fixed_block_size(ideal_buffer_size as u32);
+
+        for view in array.iter() {
+            builder.append_option(view);
+        }
+
+        Some(Arc::new(builder.finish()))
+    } else {
+        None
+    }
+}
+
+pub fn compact_column(threshold: f32, column: ArrayRef) -> ArrayRef {
+    if let Some(string_view_array) = column.as_string_view_opt() {
+        return compact_view_column(threshold, string_view_array).unwrap_or(column);
+    }
+
+    if let Some(bin_view_array) = column.as_binary_view_opt() {
+        return compact_view_column(threshold, bin_view_array).unwrap_or(column);
+    }
+
+    column
+}
+
+pub fn compact(threshold: f32, batch: RecordBatch) -> RecordBatch {
+    let (schema, columns, row_count) = batch.into_parts();
+    let handle_column = |col| compact_column(threshold, col);
+    let columns = columns.into_iter().map(handle_column).collect();
+
+    unsafe { RecordBatch::new_unchecked(schema, columns, row_count) }
 }
 
 #[cfg(test)]
