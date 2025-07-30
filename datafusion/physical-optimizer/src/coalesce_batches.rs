@@ -25,8 +25,8 @@ use std::sync::Arc;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
 use datafusion_physical_plan::{
-    coalesce_batches::CoalesceBatchesExec, filter::FilterExec, joins::HashJoinExec,
-    ExecutionPlan,
+    coalesce_batches::CoalesceBatchesExec, compact::CompactExec, filter::FilterExec,
+    joins::HashJoinExec, ExecutionPlan,
 };
 
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -63,10 +63,20 @@ impl PhysicalOptimizerRule for CoalesceBatches {
                 || plan_any.downcast_ref::<HashJoinExec>().is_some();
 
             if wrap_in_coalesce {
-                Ok(Transformed::yes(Arc::new(CoalesceBatchesExec::new(
-                    plan,
-                    target_batch_size,
-                ))))
+                if config.execution.compact_batches {
+                    Ok(Transformed::yes(Arc::new(CoalesceBatchesExec::new(
+                        plan,
+                        target_batch_size,
+                    ))))
+                } else {
+                    Ok(Transformed::yes(Arc::new(CoalesceBatchesExec::new(
+                        Arc::new(CompactExec::new(
+                            config.execution.compact_threshold as f32,
+                            plan,
+                        )) as _,
+                        target_batch_size,
+                    ))))
+                }
             } else {
                 Ok(Transformed::no(plan))
             }
