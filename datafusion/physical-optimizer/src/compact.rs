@@ -51,18 +51,41 @@ impl PhysicalOptimizerRule for CompactBatches {
         ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
             // todo: Move compaction into hash join: Different compaction strategy for build / probe side columns
             // for now we assume that the join reduces cardinality -- so it is better to compact after the join
+            // todo: Add "eager" mode to build side of hash join. Then we can push down compaction of full join to right side
+            //   + collect build side strings eagerly
             if let Some(hj) = root.as_any().downcast_ref::<HashJoinExec>() {
                 let left = rec(Arc::clone(&hj.left()), true, compact_threshold)?; // build side
-                let right = rec(Arc::clone(&hj.right()), false, compact_threshold)?; // probe side
 
-                return if left.transformed || right.transformed || compact_needed {
-                    let new_root = root.with_new_children(vec![left.data, right.data])?;
-                    let new_root = if compact_needed {
-                        Arc::new(CompactExec::new(compact_threshold, new_root))
-                    } else {
-                        new_root
-                    };
-                    Ok(Transformed::yes(new_root))
+                let (compact_right, compact_after) = match hj.join_type() {
+                    JoinType::Inner => (false, compact_needed),
+                    JoinType::Left => (false, compact_needed),
+                    JoinType::Right => (compact_needed, false),
+                    JoinType::Full => (false, compact_needed),
+                    JoinType::LeftSemi => (false, compact_needed),
+                    JoinType::RightSemi => (false, compact_needed),
+                    JoinType::LeftAnti => (false, compact_needed),
+                    JoinType::RightAnti => (false, compact_needed),
+                    JoinType::LeftMark => (false, false),
+                    JoinType::RightMark => (compact_needed, false),
+                };
+
+                let right =
+                    rec(Arc::clone(&hj.right()), compact_right, compact_threshold)?; // probe side
+
+                let root = if left.transformed || right.transformed {
+                    root.with_new_children(vec![left.data, right.data])?
+                } else {
+                    root
+                };
+
+                let root = if compact_after {
+                    Arc::new(CompactExec::new(compact_threshold, root))
+                } else {
+                    root
+                };
+
+                return if left.transformed || right.transformed || compact_after {
+                    Ok(Transformed::yes(root))
                 } else {
                     Ok(Transformed::no(root))
                 };
