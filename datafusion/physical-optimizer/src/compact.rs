@@ -50,37 +50,21 @@ impl PhysicalOptimizerRule for CompactBatches {
             compact_threshold: f32,
         ) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
             // todo: Move compaction into hash join: Different compaction strategy for build / probe side columns
+            // for now we assume that the join reduces cardinality -- so it is better to compact after the join
             if let Some(hj) = root.as_any().downcast_ref::<HashJoinExec>() {
-                let left = rec(Arc::clone(&hj.left()), true, compact_threshold)?;
+                let left = rec(Arc::clone(&hj.left()), true, compact_threshold)?; // build side
+                let right = rec(Arc::clone(&hj.right()), false, compact_threshold)?; // probe side
 
-                let right_compact_needed = compact_needed
-                    && !matches!(
-                        hj.join_type(),
-                        JoinType::LeftSemi | JoinType::LeftAnti | JoinType::LeftMark
-                    );
-
-                let right = rec(
-                    Arc::clone(&hj.right()),
-                    right_compact_needed,
-                    compact_threshold,
-                )?;
-
-                return if left.transformed || right.transformed {
-                    Ok(Transformed::yes(Arc::new(CompactExec::new(
-                        compact_threshold,
-                        root.with_new_children(vec![left.data, right.data])?,
-                    ))))
-                } else {
-                    if compact_needed {
-                        Ok(Transformed::yes(Arc::new(CompactExec::new(
-                            compact_threshold,
-                            root,
-                        ))))
+                return if left.transformed || right.transformed || compact_needed {
+                    let new_root = root.with_new_children(vec![left.data, right.data])?;
+                    let new_root = if compact_needed {
+                        Arc::new(CompactExec::new(compact_threshold, new_root))
                     } else {
-                        Ok(Transformed::no(
-                            root.with_new_children(vec![left.data, right.data])?,
-                        ))
-                    }
+                        new_root
+                    };
+                    Ok(Transformed::yes(new_root))
+                } else {
+                    Ok(Transformed::no(root))
                 };
             }
 
