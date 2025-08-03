@@ -85,6 +85,7 @@ pub mod spill;
 pub mod stream;
 pub mod streaming;
 pub mod tree_node;
+pub mod umami;
 pub mod union;
 pub mod unnest;
 pub mod values;

@@ -23,6 +23,7 @@ use crate::filter_pushdown::{
 pub use crate::metrics::Metric;
 pub use crate::ordering::InputOrderMode;
 pub use crate::stream::EmptyRecordBatchStream;
+use crate::umami::factory::StreamFactory;
 
 pub use datafusion_common::hash_utils;
 pub use datafusion_common::utils::project_schema;
@@ -406,6 +407,14 @@ pub trait ExecutionPlan: Debug + DisplayAs + Send + Sync {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream>;
+
+    fn execute_factory(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<Box<dyn StreamFactory>> {
+        unimplemented!("This execution plan's stream can not be reinstantiated.")
+    }
 
     /// Return a snapshot of the set of [`Metric`]s for this
     /// [`ExecutionPlan`]. If no `Metric`s are available, return None.
