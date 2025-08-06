@@ -20,7 +20,7 @@ use arrow::array::{
     LargeBinaryBuilder, LargeStringBuilder, StringBuilder, StringViewBuilder,
 };
 use arrow::datatypes::DataType;
-use datafusion_common::{internal_err, Result};
+use datafusion_common::{internal_err, HashMap, Result};
 use datafusion_expr::{EmitTo, GroupsAccumulator};
 use datafusion_functions_aggregate_common::aggregate::groups_accumulator::nulls::apply_filter_as_nulls;
 use std::mem::size_of;
@@ -389,14 +389,118 @@ struct MinMaxBytesState {
     /// The total bytes of the string data (for pre-allocating the final array,
     /// and tracking memory usage)
     total_data_bytes: usize,
+    /// Local reducer
+    local_reducer: LocalReducer,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum MinMaxLocation<'a> {
-    /// the min/max value is stored in the existing `min_max` array
-    ExistingMinMax,
-    /// the min/max value is stored in the input array at the given index
-    Input(&'a [u8]),
+#[derive(Debug)]
+enum Mode {
+    Flat(Vec<Option<(*const u8, usize)>>),
+    Map(HashMap<usize, (*const u8, usize)>),
+}
+
+#[derive(Debug)]
+struct LocalReducer {
+    mode: Mode,
+    threshold: usize,
+}
+
+unsafe impl Send for LocalReducer {}
+
+impl Default for LocalReducer {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Flat(vec![]),
+            threshold: 8192 * 4,
+        }
+    }
+}
+
+impl LocalReducer {
+    fn clear(&mut self) {
+        match self.mode {
+            Mode::Flat(ref mut items) => items.clear(),
+            Mode::Map(ref mut map) => map.clear(),
+        }
+    }
+
+    fn reserve(&mut self, groups: usize, batch: usize) {
+        if groups > self.threshold {
+            match self.mode {
+                Mode::Flat(_) => self.mode = Mode::Map(HashMap::with_capacity(batch)),
+                Mode::Map(ref mut hash_map) => hash_map.reserve(batch),
+            }
+        } else {
+            match self.mode {
+                Mode::Flat(ref mut items) => items.resize(groups, None),
+                Mode::Map(_) => unreachable!(),
+            }
+        }
+    }
+
+    fn ingest<'a>(
+        &mut self,
+        cmp: &mut impl FnMut(&[u8], &[u8]) -> bool,
+        iter: impl IntoIterator<Item = (usize, &'a [u8])>,
+    ) {
+        match self.mode {
+            Mode::Flat(ref mut items) => {
+                iter.into_iter().for_each(|(idx, val)| {
+                    items[idx] = {
+                        Some(match items[idx] {
+                            Some(old) => {
+                                let old =
+                                    unsafe { std::slice::from_raw_parts(old.0, old.1) };
+                                match cmp(val, old) {
+                                    true => (val.as_ptr(), val.len()),
+                                    false => (old.as_ptr(), old.len()),
+                                }
+                            }
+                            None => (val.as_ptr(), val.len()),
+                        })
+                    }
+                });
+            }
+            Mode::Map(ref mut hash_map) => {
+                // todo: replace this with the entries API
+                iter.into_iter().for_each(|(idx, val)| {
+                    let val = {
+                        match hash_map.get(&idx) {
+                            Some(old) => {
+                                let old =
+                                    unsafe { std::slice::from_raw_parts(old.0, old.1) };
+
+                                match cmp(val, old) {
+                                    true => (val.as_ptr(), val.len()),
+                                    false => (old.as_ptr(), old.len()),
+                                }
+                            }
+                            None => (val.as_ptr(), val.len()),
+                        }
+                    };
+
+                    hash_map.insert(idx, val);
+                });
+            }
+        }
+    }
+
+    fn for_each(&self, mut f: impl FnMut(usize, &[u8])) {
+        match self.mode {
+            Mode::Flat(ref items) => {
+                items.iter().filter_map(|v| *v).enumerate().for_each(
+                    |(idx, (ptr, len))| {
+                        let s = unsafe { std::slice::from_raw_parts(ptr, len) };
+                        f(idx, s)
+                    },
+                )
+            }
+            Mode::Map(ref hash_map) => hash_map.iter().for_each(|(idx, (ptr, len))| {
+                let s = unsafe { std::slice::from_raw_parts(*ptr, *len) };
+                f(*idx, s)
+            }),
+        };
+    }
 }
 
 /// Implement the MinMaxBytesAccumulator with a comparison function
@@ -411,23 +515,7 @@ impl MinMaxBytesState {
             min_max: vec![],
             data_type,
             total_data_bytes: 0,
-        }
-    }
-
-    /// Set the specified group to the given value, updating memory usage appropriately
-    fn set_value(&mut self, group_index: usize, new_val: &[u8]) {
-        match self.min_max[group_index].as_mut() {
-            None => {
-                self.min_max[group_index] = Some(new_val.to_vec());
-                self.total_data_bytes += new_val.len();
-            }
-            Some(existing_val) => {
-                // Copy data over to avoid re-allocating
-                self.total_data_bytes -= existing_val.len();
-                self.total_data_bytes += new_val.len();
-                existing_val.clear();
-                existing_val.extend_from_slice(new_val);
-            }
+            local_reducer: LocalReducer::default(),
         }
     }
 
@@ -450,41 +538,35 @@ impl MinMaxBytesState {
         // Minimize value copies by calculating the new min/maxes for each group
         // in this batch (either the existing min/max or the new input value)
         // and updating the owned values in `self.min_maxes` at most once
-        let mut locations = vec![MinMaxLocation::ExistingMinMax; total_num_groups];
+        self.local_reducer.clear();
+        self.local_reducer
+            .reserve(total_num_groups, group_indices.len());
+        self.local_reducer.ingest(
+            &mut cmp,
+            group_indices
+                .iter()
+                .cloned()
+                .zip(iter.into_iter().filter_map(|v| v)),
+        );
 
-        // Figure out the new min value for each group
-        for (new_val, group_index) in iter.into_iter().zip(group_indices.iter()) {
-            let group_index = *group_index;
-            let Some(new_val) = new_val else {
-                continue; // skip nulls
-            };
-
-            let existing_val = match locations[group_index] {
-                // previous input value was the min/max, so compare it
-                MinMaxLocation::Input(existing_val) => existing_val,
-                MinMaxLocation::ExistingMinMax => {
-                    let Some(existing_val) = self.min_max[group_index].as_ref() else {
-                        // no existing min/max, so this is the new min/max
-                        locations[group_index] = MinMaxLocation::Input(new_val);
-                        continue;
-                    };
-                    existing_val.as_ref()
+        self.local_reducer.for_each(|group_index, new_val| {
+            match self.min_max[group_index].as_mut() {
+                None => {
+                    self.min_max[group_index] = Some(new_val.to_vec());
+                    self.total_data_bytes += new_val.len();
                 }
-            };
-
-            // Compare the new value to the existing value, replacing if necessary
-            if cmp(new_val, existing_val) {
-                locations[group_index] = MinMaxLocation::Input(new_val);
+                Some(existing_val) => {
+                    if cmp(new_val, existing_val) {
+                        // Copy data over to avoid re-allocating
+                        self.total_data_bytes -= existing_val.len();
+                        self.total_data_bytes += new_val.len();
+                        existing_val.clear();
+                        existing_val.extend_from_slice(new_val);
+                    }
+                }
             }
-        }
+        });
 
-        // Update self.min_max with any new min/max values we found in the input
-        for (group_index, location) in locations.iter().enumerate() {
-            match location {
-                MinMaxLocation::ExistingMinMax => {}
-                MinMaxLocation::Input(new_val) => self.set_value(group_index, new_val),
-            }
-        }
         Ok(())
     }
 
