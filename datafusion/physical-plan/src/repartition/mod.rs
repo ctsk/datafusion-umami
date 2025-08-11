@@ -31,7 +31,6 @@ use super::{
     DisplayAs, ExecutionPlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use crate::execution_plan::{CardinalityEffect, EvaluationType, SchedulingType};
-use crate::hash_utils::create_hashes;
 use crate::metrics::BaselineMetrics;
 use crate::projection::{all_columns, make_with_child, update_expr, ProjectionExec};
 use crate::repartition::distributor_channels::{
@@ -41,9 +40,8 @@ use crate::sorts::streaming_merge::StreamingMergeBuilder;
 use crate::stream::RecordBatchStreamAdapter;
 use crate::{DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, Statistics};
 
-use arrow::array::{PrimitiveArray, RecordBatch, RecordBatchOptions};
-use arrow::compute::take_arrays;
-use arrow::datatypes::{SchemaRef, UInt32Type};
+use arrow::array::RecordBatch;
+use arrow::datatypes::SchemaRef;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::utils::transpose;
 use datafusion_common::{internal_err, HashMap};
@@ -64,6 +62,7 @@ use log::trace;
 use parking_lot::Mutex;
 
 mod distributor_channels;
+mod partition;
 mod scatter;
 
 type MaybeBatch = Option<Result<RecordBatch>>;
@@ -258,10 +257,9 @@ pub struct BatchPartitioner {
 
 enum BatchPartitionerState {
     Hash {
-        random_state: ahash::RandomState,
-        exprs: Vec<Arc<dyn PhysicalExpr>>,
+        partitioner: partition::Partitioner,
         num_partitions: usize,
-        hash_buffer: Vec<u64>,
+        batches_buffer: Vec<RecordBatch>,
     },
     RoundRobin {
         num_partitions: usize,
@@ -282,11 +280,13 @@ impl BatchPartitioner {
                 }
             }
             Partitioning::Hash(exprs, num_partitions) => BatchPartitionerState::Hash {
-                exprs,
+                partitioner: partition::Partitioner::new(
+                    exprs,
+                    ahash::RandomState::with_seeds(0, 0, 0, 0),
+                    num_partitions,
+                ),
                 num_partitions,
-                // Use fixed random hash
-                random_state: ahash::RandomState::with_seeds(0, 0, 0, 0),
-                hash_buffer: vec![],
+                batches_buffer: vec![],
             },
             other => return not_impl_err!("Unsupported repartitioning scheme {other:?}"),
         };
@@ -307,10 +307,10 @@ impl BatchPartitioner {
     where
         F: FnMut(usize, RecordBatch) -> Result<()>,
     {
-        self.partition_iter(batch)?.try_for_each(|res| match res {
-            Ok((partition, batch)) => f(partition, batch),
-            Err(e) => Err(e),
-        })
+        match self.partition_iter(batch)? {
+            Some(mut iter) => iter.try_for_each(|res| res.and_then(|v| f(v.0, v.1))),
+            None => Ok(()),
+        }
     }
 
     /// Actual implementation of [`partition`](Self::partition).
@@ -321,7 +321,8 @@ impl BatchPartitioner {
     fn partition_iter(
         &mut self,
         batch: RecordBatch,
-    ) -> Result<impl Iterator<Item = Result<(usize, RecordBatch)>> + Send + '_> {
+    ) -> Result<Option<impl Iterator<Item = Result<(usize, RecordBatch)>> + Send + '_>>
+    {
         let it: Box<dyn Iterator<Item = Result<(usize, RecordBatch)>> + Send> =
             match &mut self.state {
                 BatchPartitionerState::RoundRobin {
@@ -333,68 +334,30 @@ impl BatchPartitioner {
                     Box::new(std::iter::once(Ok((idx, batch))))
                 }
                 BatchPartitionerState::Hash {
-                    random_state,
-                    exprs,
+                    partitioner,
                     num_partitions: partitions,
-                    hash_buffer,
+                    batches_buffer,
                 } => {
-                    // Tracking time required for distributing indexes across output partitions
-                    let timer = self.timer.timer();
+                    batches_buffer.push(batch);
+                    let _timer = self.timer.timer();
 
-                    let arrays = exprs
-                        .iter()
-                        .map(|expr| expr.evaluate(&batch)?.into_array(batch.num_rows()))
-                        .collect::<Result<Vec<_>>>()?;
-
-                    hash_buffer.clear();
-                    hash_buffer.resize(batch.num_rows(), 0);
-
-                    create_hashes(&arrays, random_state, hash_buffer)?;
-
-                    let mut indices: Vec<_> = (0..*partitions)
-                        .map(|_| Vec::with_capacity(batch.num_rows()))
-                        .collect();
-
-                    for (index, hash) in hash_buffer.iter().enumerate() {
-                        indices[(*hash % *partitions as u64) as usize].push(index as u32);
+                    if batches_buffer.len() < 64.min(*partitions) {
+                        return Ok(None);
+                    } else {
+                        let batches = partitioner.partition(batches_buffer)?;
+                        batches_buffer.clear();
+                        Box::new(
+                            batches
+                                .into_iter()
+                                .enumerate()
+                                .filter(|(_, batch)| batch.num_rows() > 0)
+                                .map(|x| Ok(x)),
+                        )
                     }
-
-                    // Finished building index-arrays for output partitions
-                    timer.done();
-
-                    // Borrowing partitioner timer to prevent moving `self` to closure
-                    let partitioner_timer = &self.timer;
-                    let it = indices
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(partition, indices)| {
-                            let indices: PrimitiveArray<UInt32Type> = indices.into();
-                            (!indices.is_empty()).then_some((partition, indices))
-                        })
-                        .map(move |(partition, indices)| {
-                            // Tracking time required for repartitioned batches construction
-                            let _timer = partitioner_timer.timer();
-
-                            // Produce batches based on indices
-                            let columns = take_arrays(batch.columns(), &indices, None)?;
-
-                            let mut options = RecordBatchOptions::new();
-                            options = options.with_row_count(Some(indices.len()));
-                            let batch = RecordBatch::try_new_with_options(
-                                batch.schema(),
-                                columns,
-                                &options,
-                            )
-                            .unwrap();
-
-                            Ok((partition, batch))
-                        });
-
-                    Box::new(it)
                 }
             };
 
-        Ok(it)
+        Ok(Some(it))
     }
 
     // return the number of output partitions
@@ -946,22 +909,30 @@ impl RepartitionExec {
                 None => break,
             };
 
-            for res in partitioner.partition_iter(batch)? {
-                let (partition, batch) = res?;
-                let size = batch.get_array_memory_size();
+            match partitioner.partition_iter(batch)? {
+                Some(iter) => {
+                    for res in iter {
+                        let (partition, batch) = res?;
+                        let size = batch.get_array_memory_size();
 
-                let timer = metrics.send_time[partition].timer();
-                // if there is still a receiver, send to it
-                if let Some((tx, reservation)) = output_channels.get_mut(&partition) {
-                    reservation.lock().try_grow(size)?;
+                        let timer = metrics.send_time[partition].timer();
+                        // if there is still a receiver, send to it
+                        if let Some((tx, reservation)) =
+                            output_channels.get_mut(&partition)
+                        {
+                            reservation.lock().try_grow(size)?;
 
-                    if tx.send(Some(Ok(batch))).await.is_err() {
-                        // If the other end has hung up, it was an early shutdown (e.g. LIMIT)
-                        reservation.lock().shrink(size);
-                        output_channels.remove(&partition);
+                            if tx.send(Some(Ok(batch))).await.is_err() {
+                                // If the other end has hung up, it was an early shutdown (e.g. LIMIT)
+                                reservation.lock().shrink(size);
+                                output_channels.remove(&partition);
+                            }
+                        }
+                        timer.done();
                     }
                 }
-                timer.done();
+
+                None => {}
             }
 
             // If the input stream is endless, we may spin forever and

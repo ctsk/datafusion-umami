@@ -15,16 +15,11 @@ pub fn scatter(
     indices: &[Vec<u64>],
     hist: &[usize],
     array: &[&dyn Array],
-    write_combine: bool,
 ) -> Vec<ArrayRef> {
     let arr = array[0];
     downcast_primitive_array!(
         arr => {
-            if write_combine {
-                scatter_primitive::<_, true>(indices, hist, &to(arr, array))
-            } else {
-                scatter_primitive::<_, false>(indices, hist, &to(arr, array))
-            }
+            scatter_primitive::<_, false>(indices, hist, &to(arr, array))
         }
         DataType::Utf8View => {
             scatter_view(indices, hist, &to(arr.as_string_view(), array))
