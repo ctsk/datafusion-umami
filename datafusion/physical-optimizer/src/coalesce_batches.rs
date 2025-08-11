@@ -24,10 +24,9 @@ use std::sync::Arc;
 
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
-use datafusion_physical_expr::Partitioning;
 use datafusion_physical_plan::{
     coalesce_batches::CoalesceBatchesExec, filter::FilterExec, joins::HashJoinExec,
-    repartition::RepartitionExec, ExecutionPlan,
+    ExecutionPlan,
 };
 
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -61,17 +60,8 @@ impl PhysicalOptimizerRule for CoalesceBatches {
             // would be to build the coalescing logic directly into the operators
             // See https://github.com/apache/datafusion/issues/139
             let wrap_in_coalesce = plan_any.downcast_ref::<FilterExec>().is_some()
-                || plan_any.downcast_ref::<HashJoinExec>().is_some()
-                // Don't need to add CoalesceBatchesExec after a round robin RepartitionExec
-                || plan_any
-                    .downcast_ref::<RepartitionExec>()
-                    .map(|repart_exec| {
-                        !matches!(
-                            repart_exec.partitioning().clone(),
-                            Partitioning::RoundRobinBatch(_)
-                        )
-                    })
-                    .unwrap_or(false);
+                || plan_any.downcast_ref::<HashJoinExec>().is_some();
+
             if wrap_in_coalesce {
                 Ok(Transformed::yes(Arc::new(CoalesceBatchesExec::new(
                     plan,
