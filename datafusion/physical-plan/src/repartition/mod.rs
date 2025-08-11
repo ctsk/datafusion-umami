@@ -360,6 +360,36 @@ impl BatchPartitioner {
         Ok(Some(it))
     }
 
+    fn flush(
+        &mut self,
+    ) -> Result<Option<impl Iterator<Item = Result<(usize, RecordBatch)>> + Send + '_>>
+    {
+        match &mut self.state {
+            BatchPartitionerState::Hash {
+                partitioner,
+                num_partitions: _,
+                batches_buffer,
+            } => {
+                let _timer = self.timer.timer();
+
+                if batches_buffer.len() > 0 {
+                    let batches = partitioner.partition(batches_buffer)?;
+                    batches_buffer.clear();
+                    Ok(Some(Box::new(
+                        batches
+                            .into_iter()
+                            .enumerate()
+                            .filter(|(_, batch)| batch.num_rows() > 0)
+                            .map(|x| Ok(x)),
+                    )))
+                } else {
+                    Ok(None)
+                }
+            }
+            BatchPartitionerState::RoundRobin { .. } => Ok(None),
+        }
+    }
+
     // return the number of output partitions
     fn num_partitions(&self) -> usize {
         match self.state {
@@ -879,6 +909,34 @@ impl RepartitionExec {
         }
     }
 
+    async fn send_batches(
+        metrics: &RepartitionMetrics,
+        output_channels: &mut HashMap<
+            usize,
+            (DistributionSender<MaybeBatch>, SharedMemoryReservation),
+        >,
+        iter: impl Iterator<Item = Result<(usize, RecordBatch)>> + Send + '_,
+    ) -> Result<()> {
+        for res in iter {
+            let (partition, batch) = res?;
+            let size = batch.get_array_memory_size();
+
+            let timer = metrics.send_time[partition].timer();
+            // if there is still a receiver, send to it
+            if let Some((tx, reservation)) = output_channels.get_mut(&partition) {
+                reservation.lock().try_grow(size)?;
+
+                if tx.send(Some(Ok(batch))).await.is_err() {
+                    // If the other end has hung up, it was an early shutdown (e.g. LIMIT)
+                    reservation.lock().shrink(size);
+                    output_channels.remove(&partition);
+                }
+            }
+            timer.done();
+        }
+        Ok(())
+    }
+
     /// Pulls data from the specified input plan, feeding it to the
     /// output partitions based on the desired partitioning
     ///
@@ -906,33 +964,20 @@ impl RepartitionExec {
             // Input is done
             let batch = match result {
                 Some(result) => result?,
-                None => break,
+                None => {
+                    match partitioner.flush()? {
+                        Some(iter) => {
+                            Self::send_batches(&metrics, &mut output_channels, iter)
+                                .await?;
+                        }
+                        None => {}
+                    }
+                    break;
+                }
             };
 
-            match partitioner.partition_iter(batch)? {
-                Some(iter) => {
-                    for res in iter {
-                        let (partition, batch) = res?;
-                        let size = batch.get_array_memory_size();
-
-                        let timer = metrics.send_time[partition].timer();
-                        // if there is still a receiver, send to it
-                        if let Some((tx, reservation)) =
-                            output_channels.get_mut(&partition)
-                        {
-                            reservation.lock().try_grow(size)?;
-
-                            if tx.send(Some(Ok(batch))).await.is_err() {
-                                // If the other end has hung up, it was an early shutdown (e.g. LIMIT)
-                                reservation.lock().shrink(size);
-                                output_channels.remove(&partition);
-                            }
-                        }
-                        timer.done();
-                    }
-                }
-
-                None => {}
+            if let Some(iter) = partitioner.partition_iter(batch)? {
+                Self::send_batches(&metrics, &mut output_channels, iter).await?;
             }
 
             // If the input stream is endless, we may spin forever and

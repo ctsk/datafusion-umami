@@ -257,7 +257,7 @@ def main() -> None:
     compare_parser.add_argument(
         "--noise-threshold",
         type=float,
-        default=0.05,
+        default=0.03,
         help="The threshold for statistically insignificant results (+/- %5).",
     )
     compare_parser.add_argument(
