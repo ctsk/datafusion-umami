@@ -20,13 +20,14 @@
 
 use crate::PhysicalOptimizerRule;
 
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
+use datafusion_physical_expr::Partitioning;
 use datafusion_physical_plan::{
     coalesce_batches::CoalesceBatchesExec, compact::CompactExec, filter::FilterExec,
-    joins::HashJoinExec, ExecutionPlan,
+    joins::HashJoinExec, repartition::RepartitionExec, ExecutionPlan,
 };
 
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -42,6 +43,33 @@ impl CoalesceBatches {
         Self::default()
     }
 }
+
+enum Strategy {
+    Full,
+    Reduced,
+}
+
+// The goal here is to detect operators that could produce small batches and only
+// wrap those ones with a CoalesceBatchesExec operator. An alternate approach here
+// would be to build the coalescing logic directly into the operators
+// See https://github.com/apache/datafusion/issues/139
+fn coalesce_strategy(plan_any: &dyn Any) -> Option<Strategy> {
+    if plan_any.downcast_ref::<FilterExec>().is_some()
+        || plan_any.downcast_ref::<HashJoinExec>().is_some()
+    {
+        return Some(Strategy::Full);
+    }
+
+    if plan_any
+        .downcast_ref::<RepartitionExec>()
+        .map(|repart| matches!(repart.partitioning(), Partitioning::Hash(_, _)))
+        .unwrap_or(false)
+    {
+        return Some(Strategy::Reduced);
+    }
+    return None;
+}
+
 impl PhysicalOptimizerRule for CoalesceBatches {
     fn optimize(
         &self,
@@ -54,19 +82,17 @@ impl PhysicalOptimizerRule for CoalesceBatches {
 
         let target_batch_size = config.execution.batch_size;
         plan.transform_up(|plan| {
-            let plan_any = plan.as_any();
-            // The goal here is to detect operators that could produce small batches and only
-            // wrap those ones with a CoalesceBatchesExec operator. An alternate approach here
-            // would be to build the coalescing logic directly into the operators
-            // See https://github.com/apache/datafusion/issues/139
-            let wrap_in_coalesce = plan_any.downcast_ref::<FilterExec>().is_some()
-                || plan_any.downcast_ref::<HashJoinExec>().is_some();
+            let strategy = coalesce_strategy(plan.as_any());
 
-            if wrap_in_coalesce {
+            if let Some(strategy) = strategy {
+                let threshold = match strategy {
+                    Strategy::Full => target_batch_size,
+                    Strategy::Reduced => target_batch_size / 2,
+                };
+
                 if config.execution.compact_batches {
                     Ok(Transformed::yes(Arc::new(CoalesceBatchesExec::new(
-                        plan,
-                        target_batch_size,
+                        plan, threshold,
                     ))))
                 } else {
                     Ok(Transformed::yes(Arc::new(CoalesceBatchesExec::new(
@@ -74,7 +100,7 @@ impl PhysicalOptimizerRule for CoalesceBatches {
                             config.execution.compact_threshold as f32,
                             plan,
                         )) as _,
-                        target_batch_size,
+                        threshold,
                     ))))
                 }
             } else {
