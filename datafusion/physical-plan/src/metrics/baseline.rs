@@ -118,7 +118,7 @@ impl BaselineMetrics {
     /// batch output for other thing
     pub fn record_output(&self, num_rows: usize) {
         self.output_rows.add(num_rows);
-        self.output_batches.add(num_rows);
+        self.output_batches.add(1);
     }
 
     /// If not previously recorded `done()`, record

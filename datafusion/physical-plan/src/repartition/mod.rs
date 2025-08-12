@@ -491,6 +491,8 @@ struct RepartitionMetrics {
     ///
     /// One metric per output partition.
     send_time: Vec<metrics::Time>,
+    /// Baseline metrics
+    baseline_metrics: BaselineMetrics,
 }
 
 impl RepartitionMetrics {
@@ -522,6 +524,7 @@ impl RepartitionMetrics {
             fetch_time,
             repartition_time,
             send_time,
+            baseline_metrics: BaselineMetrics::new(&metrics, input_partition),
         }
     }
 }
@@ -921,6 +924,7 @@ impl RepartitionExec {
             let (partition, batch) = res?;
             let size = batch.get_array_memory_size();
 
+            metrics.baseline_metrics.record_output(batch.num_rows());
             let timer = metrics.send_time[partition].timer();
             // if there is still a receiver, send to it
             if let Some((tx, reservation)) = output_channels.get_mut(&partition) {
