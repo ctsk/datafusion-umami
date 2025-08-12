@@ -348,6 +348,8 @@ impl Drop for ScopedTimerGuard<'_> {
 pub enum MetricValue {
     /// Number of output rows produced: "output_rows" metric
     OutputRows(Count),
+    /// Number of output batches produced: "output_batches" metric
+    OutputBatches(Count),
     /// Elapsed Compute Time: the wall clock time spent in "cpu
     /// intensive" work.
     ///
@@ -480,6 +482,7 @@ impl MetricValue {
     pub fn name(&self) -> &str {
         match self {
             Self::OutputRows(_) => "output_rows",
+            Self::OutputBatches(_) => "output_batches",
             Self::SpillCount(_) => "spill_count",
             Self::SpilledBytes(_) => "spilled_bytes",
             Self::SpilledRows(_) => "spilled_rows",
@@ -498,6 +501,7 @@ impl MetricValue {
     pub fn as_usize(&self) -> usize {
         match self {
             Self::OutputRows(count) => count.value(),
+            Self::OutputBatches(count) => count.value(),
             Self::SpillCount(count) => count.value(),
             Self::SpilledBytes(bytes) => bytes.value(),
             Self::SpilledRows(count) => count.value(),
@@ -525,6 +529,7 @@ impl MetricValue {
     pub fn new_empty(&self) -> Self {
         match self {
             Self::OutputRows(_) => Self::OutputRows(Count::new()),
+            Self::OutputBatches(_) => Self::OutputBatches(Count::new()),
             Self::SpillCount(_) => Self::SpillCount(Count::new()),
             Self::SpilledBytes(_) => Self::SpilledBytes(Count::new()),
             Self::SpilledRows(_) => Self::SpilledRows(Count::new()),
@@ -563,6 +568,7 @@ impl MetricValue {
     pub fn aggregate(&mut self, other: &Self) {
         match (self, other) {
             (Self::OutputRows(count), Self::OutputRows(other_count))
+            | (Self::OutputBatches(count), Self::OutputBatches(other_count))
             | (Self::SpillCount(count), Self::SpillCount(other_count))
             | (Self::SpilledBytes(count), Self::SpilledBytes(other_count))
             | (Self::SpilledRows(count), Self::SpilledRows(other_count))
@@ -616,17 +622,18 @@ impl MetricValue {
     pub fn display_sort_key(&self) -> u8 {
         match self {
             Self::OutputRows(_) => 0,     // show first
-            Self::ElapsedCompute(_) => 1, // show second
-            Self::SpillCount(_) => 2,
-            Self::SpilledBytes(_) => 3,
-            Self::SpilledRows(_) => 4,
-            Self::CurrentMemoryUsage(_) => 5,
-            Self::Count { .. } => 6,
-            Self::Gauge { .. } => 7,
-            Self::Time { .. } => 8,
-            Self::StartTimestamp(_) => 9, // show timestamps last
-            Self::EndTimestamp(_) => 10,
-            Self::Custom { .. } => 11,
+            Self::OutputBatches(_) => 1,  // show second
+            Self::ElapsedCompute(_) => 2, // show third
+            Self::SpillCount(_) => 3,
+            Self::SpilledBytes(_) => 4,
+            Self::SpilledRows(_) => 5,
+            Self::CurrentMemoryUsage(_) => 6,
+            Self::Count { .. } => 7,
+            Self::Gauge { .. } => 8,
+            Self::Time { .. } => 9,
+            Self::StartTimestamp(_) => 10, // show timestamps last
+            Self::EndTimestamp(_) => 11,
+            Self::Custom { .. } => 12,
         }
     }
 
@@ -641,6 +648,7 @@ impl Display for MetricValue {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::OutputRows(count)
+            | Self::OutputBatches(count)
             | Self::SpillCount(count)
             | Self::SpilledRows(count)
             | Self::Count { count, .. } => {

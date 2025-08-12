@@ -105,6 +105,14 @@ impl<'a> MetricBuilder<'a> {
         count
     }
 
+    /// Consume self and create a new counter for recording output batches
+    pub fn output_batches(self, partition: usize) -> Count {
+        let count = Count::new();
+        self.with_partition(partition)
+            .build(MetricValue::OutputBatches(count.clone()));
+        count
+    }
+
     /// Consume self and create a new counter for recording the number of spills
     /// triggered by an operator
     pub fn spill_count(self, partition: usize) -> Count {

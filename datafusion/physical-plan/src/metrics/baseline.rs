@@ -53,6 +53,9 @@ pub struct BaselineMetrics {
 
     /// output rows: the total output rows
     output_rows: Count,
+
+    /// output batches: the number of batches output by the operator
+    output_batches: Count,
 }
 
 impl BaselineMetrics {
@@ -65,6 +68,7 @@ impl BaselineMetrics {
             end_time: MetricBuilder::new(metrics).end_timestamp(partition),
             elapsed_compute: MetricBuilder::new(metrics).elapsed_compute(partition),
             output_rows: MetricBuilder::new(metrics).output_rows(partition),
+            output_batches: MetricBuilder::new(metrics).output_batches(partition),
         }
     }
 
@@ -78,6 +82,7 @@ impl BaselineMetrics {
             end_time: Default::default(),
             elapsed_compute: self.elapsed_compute.clone(),
             output_rows: Default::default(),
+            output_batches: Default::default(),
         }
     }
 
@@ -89,6 +94,11 @@ impl BaselineMetrics {
     /// return the metric for the total number of output rows produced
     pub fn output_rows(&self) -> &Count {
         &self.output_rows
+    }
+
+    /// return the metric for the total number of output batches produced
+    pub fn output_batches(&self) -> &Count {
+        &self.output_batches
     }
 
     /// Records the fact that this operator's execution is complete
@@ -108,6 +118,7 @@ impl BaselineMetrics {
     /// batch output for other thing
     pub fn record_output(&self, num_rows: usize) {
         self.output_rows.add(num_rows);
+        self.output_batches.add(num_rows);
     }
 
     /// If not previously recorded `done()`, record
