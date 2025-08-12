@@ -1,2 +1,6 @@
 #[allow(unused)]
-pub mod factory;
+mod factory;
+
+pub use factory::BasicStreamProvider;
+pub use factory::StreamFactory;
+pub use factory::StreamProvider;

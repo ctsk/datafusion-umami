@@ -21,12 +21,14 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::{DisplayAs, ExecutionPlanProperties, PlanProperties};
+use crate::aggregates::row_hash::GroupedHashAggregateStreamFactory;
 use crate::aggregates::{
     no_grouping::AggregateStream, row_hash::GroupedHashAggregateStream,
     topk_stream::GroupedTopKAggregateStream,
 };
 use crate::execution_plan::{CardinalityEffect, EmissionType};
 use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use crate::umami::{BasicStreamProvider, StreamFactory};
 use crate::windows::get_ordered_partition_by_indices;
 use crate::{
     DisplayFormatType, Distribution, ExecutionPlan, InputOrderMode,
@@ -363,6 +365,7 @@ enum StreamType {
     AggregateStream(AggregateStream),
     GroupedHash(GroupedHashAggregateStream),
     GroupedPriorityQueue(GroupedTopKAggregateStream),
+    Generic(SendableRecordBatchStream),
 }
 
 impl From<StreamType> for SendableRecordBatchStream {
@@ -371,6 +374,7 @@ impl From<StreamType> for SendableRecordBatchStream {
             StreamType::AggregateStream(stream) => Box::pin(stream),
             StreamType::GroupedHash(stream) => Box::pin(stream),
             StreamType::GroupedPriorityQueue(stream) => Box::pin(stream),
+            StreamType::Generic(stream) => stream,
         }
     }
 }
@@ -623,9 +627,21 @@ impl AggregateExec {
         }
 
         // grouping by something else and we need to just materialize all results
-        Ok(StreamType::GroupedHash(GroupedHashAggregateStream::new(
-            self, context, partition,
-        )?))
+        match self.mode() {
+            AggregateMode::Partial => Ok(StreamType::GroupedHash(
+                GroupedHashAggregateStream::new(self, context, partition)?,
+            )),
+            _ => Ok(StreamType::Generic({
+                let mut factory = GroupedHashAggregateStreamFactory::try_new(
+                    self,
+                    Arc::clone(&context),
+                    partition,
+                )?;
+                let input = self.input.execute(partition, Arc::clone(&context))?;
+                let mut provider = BasicStreamProvider::new([input]);
+                factory.make(&mut provider, partition, &context)?
+            })),
+        }
     }
 
     /// Finds the DataType and SortDirection for this Aggregate, if there is one

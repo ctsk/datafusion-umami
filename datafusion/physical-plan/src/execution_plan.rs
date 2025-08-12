@@ -23,7 +23,7 @@ use crate::filter_pushdown::{
 pub use crate::metrics::Metric;
 pub use crate::ordering::InputOrderMode;
 pub use crate::stream::EmptyRecordBatchStream;
-use crate::umami::factory::StreamFactory;
+use crate::umami::StreamFactory;
 
 pub use datafusion_common::hash_utils;
 pub use datafusion_common::utils::project_schema;
