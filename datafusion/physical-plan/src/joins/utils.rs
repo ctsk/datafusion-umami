@@ -1295,8 +1295,6 @@ pub(crate) struct BuildProbeJoinMetrics {
     pub(crate) input_batches: metrics::Count,
     /// Number of rows consumed by probe-side this operator
     pub(crate) input_rows: metrics::Count,
-    /// Number of batches produced by this operator
-    pub(crate) output_batches: metrics::Count,
 }
 
 // This Drop implementation updates the elapsed compute part of the metrics.
@@ -1340,9 +1338,6 @@ impl BuildProbeJoinMetrics {
 
         let input_rows = MetricBuilder::new(metrics).counter("input_rows", partition);
 
-        let output_batches =
-            MetricBuilder::new(metrics).counter("output_batches", partition);
-
         Self {
             build_time,
             build_input_batches,
@@ -1351,7 +1346,6 @@ impl BuildProbeJoinMetrics {
             join_time,
             input_batches,
             input_rows,
-            output_batches,
             baseline,
         }
     }

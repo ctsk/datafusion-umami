@@ -704,7 +704,7 @@ impl NestedLoopJoinStreamState {
 /// processed_count until all pairs are consumed.
 ///
 /// Example: 5000 matches, batch size limit is 100
-/// - Poll 1: output batch[0..100], processed_count = 100  
+/// - Poll 1: output batch[0..100], processed_count = 100
 /// - Poll 2: output batch[100..200], processed_count = 200
 /// - ...continues until processed_count = 5000
 struct JoinResultProgress {
@@ -1042,10 +1042,7 @@ impl NestedLoopJoinStream {
         let join_result = self.get_next_join_result()?;
 
         match join_result {
-            Some(res) => {
-                self.join_metrics.output_batches.add(1);
-                Ok(StatefulStreamResult::Ready(Some(res)))
-            }
+            Some(res) => Ok(StatefulStreamResult::Ready(Some(res))),
             None => {
                 self.state = NestedLoopJoinStreamState::FetchProbeBatch;
                 self.join_result_status = None;
@@ -1062,10 +1059,7 @@ impl NestedLoopJoinStream {
 
         let res = self.get_next_join_result()?;
         match res {
-            Some(res) => {
-                self.join_metrics.output_batches.add(1);
-                Ok(StatefulStreamResult::Ready(Some(res)))
-            }
+            Some(res) => Ok(StatefulStreamResult::Ready(Some(res))),
             None => {
                 self.state = NestedLoopJoinStreamState::Completed;
                 Ok(StatefulStreamResult::Ready(None))
