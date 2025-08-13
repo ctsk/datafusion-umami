@@ -16,7 +16,6 @@
 // under the License.
 
 use arrow::array::{ArrayRef, AsArray, GenericByteViewArray, RecordBatch};
-use arrow::compute::concat_batches;
 use arrow::datatypes::{ByteViewType, SchemaRef};
 use std::sync::Arc;
 
@@ -169,7 +168,10 @@ impl BatchCoalescer {
 
     /// Concatenates and returns all buffered batches, and clears the buffer.
     pub fn finish_batch(&mut self) -> datafusion_common::Result<RecordBatch> {
-        let batch = concat_batches(&self.schema, &self.buffer)?;
+        let batch = datafusion_arrow_extra::compute::concat_batches_reduce_views(
+            &self.schema,
+            &self.buffer,
+        )?;
         let batch = limit_view_buffers(batch);
         self.buffer.clear();
         self.buffered_rows = 0;
@@ -241,6 +243,7 @@ mod tests {
     use super::*;
 
     use arrow::array::UInt32Array;
+    use arrow::compute::concat_batches;
     use arrow::datatypes::{DataType, Field, Schema};
 
     #[test]

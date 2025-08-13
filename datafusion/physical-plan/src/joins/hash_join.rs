@@ -63,11 +63,12 @@ use arrow::array::{
     UInt32Array, UInt64Array,
 };
 use arrow::compute::kernels::cmp::{eq, not_distinct};
-use arrow::compute::{and, concat_batches, take, FilterBuilder};
+use arrow::compute::{and, take, FilterBuilder};
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
 use arrow::util::bit_util;
+use datafusion_arrow_extra::compute::concat_batches_reduce_views;
 use datafusion_common::utils::memory::estimate_memory_size;
 use datafusion_common::{
     internal_datafusion_err, internal_err, plan_err, project_schema, JoinSide, JoinType,
@@ -1022,7 +1023,7 @@ async fn collect_left_input(
         offset += batch.num_rows();
     }
     // Merge all batches into a single batch, so we can directly index into the arrays
-    let single_batch = concat_batches(&schema, batches_iter)?;
+    let single_batch = concat_batches_reduce_views(&schema, batches_iter)?;
 
     // Reserve additional memory for visited indices bitmap and create shared builder
     let visited_indices_bitmap = if with_visited_indices_bitmap {
