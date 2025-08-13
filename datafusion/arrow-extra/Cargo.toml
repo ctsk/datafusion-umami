@@ -1,0 +1,24 @@
+[package]
+name = "datafusion-arrow-extra"
+description = "Extra functionality for processing arrow data"
+keywords = ["arrow"]
+readme = "README.md"
+version = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+rust-version = { workspace = true }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "datafusion_arrow_extra"
+
+[dependencies]
+arrow = { workspace = true }

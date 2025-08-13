@@ -1889,6 +1889,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-arrow-extra"
+version = "49.0.0"
+dependencies = [
+ "arrow",
+]
+
+[[package]]
 name = "datafusion-benchmarks"
 version = "49.0.0"
 dependencies = [
@@ -2501,6 +2508,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "criterion",
+ "datafusion-arrow-extra",
  "datafusion-common",
  "datafusion-common-runtime",
  "datafusion-execution",

@@ -17,6 +17,7 @@
 
 [workspace]
 members = [
+    "datafusion/arrow-extra",
     "datafusion/common",
     "datafusion/common-runtime",
     "datafusion/catalog",
@@ -111,6 +112,7 @@ criterion = "0.5.1"
 ctor = "0.4.0"
 dashmap = "6.0.1"
 datafusion = { path = "datafusion/core", version = "49.0.0", default-features = false }
+datafusion-arrow-extra = { path = "datafusion/arrow-extra", version = "49.0.0" }
 datafusion-catalog = { path = "datafusion/catalog", version = "49.0.0" }
 datafusion-catalog-listing = { path = "datafusion/catalog-listing", version = "49.0.0" }
 datafusion-common = { path = "datafusion/common", version = "49.0.0", default-features = false }
