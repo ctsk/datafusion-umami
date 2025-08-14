@@ -1,5 +1,6 @@
 //! StreamFactory instantiates its stream for given input streams
 
+use arrow_schema::SchemaRef;
 use datafusion_common::Result;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 
@@ -34,4 +35,6 @@ pub trait StreamFactory {
         partition: usize,
         context: &TaskContext,
     ) -> Result<SendableRecordBatchStream>;
+
+    fn output_schema(&self) -> SchemaRef;
 }

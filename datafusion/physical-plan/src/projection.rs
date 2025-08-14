@@ -34,6 +34,7 @@ use super::{
 };
 use crate::execution_plan::CardinalityEffect;
 use crate::joins::utils::{ColumnIndex, JoinFilter, JoinOn, JoinOnRef};
+use crate::umami::StreamFactory;
 use crate::{ColumnStatistics, DisplayFormatType, ExecutionPlan, PhysicalExpr};
 
 use arrow::datatypes::{Field, Schema, SchemaRef};
@@ -234,6 +235,46 @@ impl ExecutionPlan for ProjectionExec {
             input: self.input.execute(partition, context)?,
             baseline_metrics: BaselineMetrics::new(&self.metrics, partition),
         }))
+    }
+
+    fn execute_factory(
+        &self,
+        _partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> Result<Box<dyn StreamFactory + Send>> {
+        struct Factory {
+            schema: SchemaRef,
+            expr: Vec<PhysicalExprRef>,
+            metrics: ExecutionPlanMetricsSet,
+        }
+
+        impl StreamFactory for Factory {
+            fn make(
+                &mut self,
+                inputs: &mut dyn crate::umami::StreamProvider,
+                partition: usize,
+                _context: &TaskContext,
+            ) -> Result<SendableRecordBatchStream> {
+                Ok(Box::pin(ProjectionStream {
+                    schema: Arc::clone(&self.schema),
+                    expr: self.expr.clone(),
+                    input: inputs.get(0),
+                    baseline_metrics: BaselineMetrics::new(&self.metrics, partition),
+                }))
+            }
+
+            fn output_schema(&self) -> SchemaRef {
+                Arc::clone(&self.schema)
+            }
+        }
+
+        let factory = Factory {
+            schema: Arc::clone(&self.schema),
+            expr: self.expr.iter().map(|x| Arc::clone(&x.0)).collect(),
+            metrics: self.metrics.clone(),
+        };
+
+        Ok(Box::new(factory))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {

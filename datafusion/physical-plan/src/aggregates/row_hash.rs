@@ -625,6 +625,10 @@ impl StreamFactory for GroupedHashAggregateStreamFactory {
             baseline_metrics,
         }))
     }
+
+    fn output_schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
 }
 
 impl GroupedHashAggregateStream {
