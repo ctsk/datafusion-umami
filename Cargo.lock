@@ -1892,7 +1892,9 @@ dependencies = [
 name = "datafusion-arrow-extra"
 version = "49.0.0"
 dependencies = [
+ "ahash 0.8.12",
  "arrow",
+ "fixedbitset",
 ]
 
 [[package]]

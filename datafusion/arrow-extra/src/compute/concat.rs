@@ -1,17 +1,16 @@
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use arrow::{
     array::{
-        Array, ArrayRef, AsArray, ByteView, GenericByteViewArray, NullBufferBuilder,
+        Array, ArrayRef, AsArray, GenericByteViewArray, NullBufferBuilder,
         RecordBatchOptions,
     },
     datatypes::{BinaryViewType, ByteViewType, DataType, SchemaRef, StringViewType},
     error::ArrowError,
     record_batch::RecordBatch,
 };
+
+use crate::utils::BufferDedup;
 
 /// concat_reduce_views delegates to [`arrow::compute::concat`] except for
 /// StringView/BinaryView columns. In those cases, it only creates references
@@ -62,80 +61,39 @@ pub fn concat_batches_reduce_views<'a>(
 }
 
 fn concat_reduce_views_impl<V: ByteViewType>(arrays: &[&dyn Array]) -> ArrayRef {
-    let total: usize = arrays.iter().map(|a| a.len()).sum();
-    let buffers: usize = arrays
-        .iter()
-        .map(|a| a.as_string_view().data_buffers().len())
-        .sum();
-    let mut views = Vec::with_capacity(total);
-    let mut buffers = Vec::with_capacity(buffers);
-    let mut buffer_dedup = HashMap::new();
-    let mut nulls = NullBufferBuilder::new(total);
+    let length: usize = arrays.iter().map(|a| a.len()).sum();
+    let mut views = Vec::with_capacity(length);
+    let mut dedup = BufferDedup::new(arrays);
+    let mut nulls = NullBufferBuilder::new(length);
 
     for array in arrays {
         let array = array.as_byte_view::<V>();
-        if let Some(anulls) = array.nulls() {
-            nulls.append_buffer(anulls);
+
+        if array.len() == 0 {
+            continue;
         }
 
-        let adjust_views = buffers.len() > 0 && array.data_buffers().len() > 0;
-
-        if adjust_views {
-            match array.nulls().filter(|n| n.null_count() > 0) {
-                Some(anulls) => {
-                    views.extend(array.views().iter().enumerate().map(|(idx, view)| {
-                        let mut byte_view = ByteView::from(*view);
-                        if byte_view.length > 12 && anulls.is_valid(idx) {
-                            let buffer_idx = byte_view.buffer_index as usize;
-                            let buffer =
-                                unsafe { array.data_buffers().get_unchecked(buffer_idx) };
-                            match buffer_dedup.entry(buffer.as_ptr()) {
-                                Entry::Occupied(occupied_entry) => {
-                                    byte_view.buffer_index = *occupied_entry.get() as u32;
-                                }
-                                Entry::Vacant(vacant_entry) => {
-                                    byte_view.buffer_index = buffers.len() as u32;
-                                    vacant_entry.insert(buffers.len());
-                                    buffers.push(buffer.clone());
-                                }
-                            }
-                            byte_view.as_u128()
-                        } else {
-                            *view
-                        }
-                    }));
-                }
-                None => {
-                    views.extend(array.views().iter().map(|view| {
-                        let mut byte_view = ByteView::from(*view);
-                        if byte_view.length > 12 {
-                            let buffer_idx = byte_view.buffer_index as usize;
-                            let buffer =
-                                unsafe { array.data_buffers().get_unchecked(buffer_idx) };
-                            match buffer_dedup.entry(buffer.as_ptr()) {
-                                Entry::Occupied(occupied_entry) => {
-                                    byte_view.buffer_index = *occupied_entry.get() as u32;
-                                }
-                                Entry::Vacant(vacant_entry) => {
-                                    byte_view.buffer_index = buffers.len() as u32;
-                                    vacant_entry.insert(buffers.len());
-                                    buffers.push(buffer.clone());
-                                }
-                            }
-                            byte_view.as_u128()
-                        } else {
-                            *view
-                        }
-                    }));
-                }
-            }
+        if let Some(anulls) = array.nulls() {
+            nulls.append_buffer(anulls);
         } else {
-            buffers.extend(array.data_buffers().iter().cloned());
-            views.extend_from_slice(array.views());
+            nulls.append_n_non_nulls(array.len());
+        }
+
+        views.extend_from_slice(array.views());
+
+        let adjust_views = dedup.buffer_count() > 0 && array.data_buffers().len() > 0;
+        if adjust_views {
+            let adjust_range = views.len() - array.len()..views.len();
+            let new_nulls = array.nulls().filter(|n| n.null_count() > 0);
+            dedup.adjust(&mut views[adjust_range], new_nulls, array.data_buffers());
         }
     }
 
     Arc::new(unsafe {
-        GenericByteViewArray::<V>::new_unchecked(views.into(), buffers, nulls.finish())
+        GenericByteViewArray::<V>::new_unchecked(
+            views.into(),
+            dedup.take(),
+            nulls.finish(),
+        )
     })
 }

@@ -1,17 +1,16 @@
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use arrow::{
     array::{
-        Array, ArrayRef, ArrowPrimitiveType, AsArray, ByteView, GenericByteViewArray,
+        Array, ArrayRef, ArrowPrimitiveType, AsArray, GenericByteViewArray,
         PrimitiveArray,
     },
     compute::TakeOptions,
     datatypes::{BinaryViewType, ByteViewType, DataType, StringViewType},
     error::ArrowError,
 };
+
+use crate::utils::BufferDedup;
 
 /// take_reduce_views delegates to [`arrow::compute::take`] except for
 /// StringView/BinaryView columns. In those cases, it only creates references
@@ -47,45 +46,9 @@ fn take_reduce_views_impl<V: ByteViewType, T: ArrowPrimitiveType>(
     let mut new_views = internal::take_native(array.views(), indices);
     let new_nulls = internal::take_nulls(array.nulls(), indices);
 
-    let new_buffers = if array.data_buffers().len() > 1 {
-        let estimate = if array.len() > 0 {
-            array.data_buffers().len() * indices.len() / array.len()
-        } else {
-            0
-        };
-
-        let mut new_buffers = Vec::with_capacity(estimate);
-        let mut buffers = HashMap::new();
-        for (idx, view) in new_views.iter_mut().enumerate() {
-            let mut byte_view = ByteView::from(*view);
-            if byte_view.length > 12
-                && new_nulls
-                    .as_ref()
-                    .map(|null| null.is_valid(idx))
-                    .unwrap_or(true)
-            {
-                let buffer_index = byte_view.buffer_index as usize;
-                let buffer = unsafe { array.data_buffers().get_unchecked(buffer_index) };
-                // todo: take whole buffer and length into account (and fix-up offset)....
-                let ptr = buffer.as_ptr();
-                match buffers.entry(ptr) {
-                    Entry::Occupied(occupied_entry) => {
-                        byte_view.buffer_index = *occupied_entry.get() as u32;
-                    }
-                    Entry::Vacant(vacant_entry) => {
-                        byte_view.buffer_index = new_buffers.len() as u32;
-                        vacant_entry.insert(new_buffers.len());
-                        new_buffers.push(buffer.clone());
-                    }
-                }
-                *view = byte_view.as_u128();
-            }
-        }
-
-        new_buffers
-    } else {
-        array.data_buffers().to_vec()
-    };
+    let mut buffer_dedup = BufferDedup::new(&[array]);
+    buffer_dedup.adjust(&mut new_views, new_nulls.as_ref(), array.data_buffers());
+    let new_buffers = buffer_dedup.take();
 
     // Safety:  array.views was valid, and take_native copies only valid values, and verifies bounds
     Ok(Arc::new(unsafe {

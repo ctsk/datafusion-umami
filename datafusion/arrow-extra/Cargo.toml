@@ -21,4 +21,6 @@ workspace = true
 name = "datafusion_arrow_extra"
 
 [dependencies]
+ahash = { workspace = true, features = ["std"] }
 arrow = { workspace = true }
+fixedbitset = "0.5.7"
