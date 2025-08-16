@@ -217,6 +217,10 @@ inherits = "release"
 debug = true
 strip = false
 
+[profile.profiling-nonlto]
+inherits = "profiling"
+lto = false
+
 [workspace.lints.clippy]
 # Detects large stack-allocated futures that may cause stack overflow crashes (see threshold in clippy.toml)
 large_futures = "warn"
