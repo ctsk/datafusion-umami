@@ -21,7 +21,7 @@ pub struct MaterializeWrapper<Buffer> {
     input: InputKind,
     partition: usize,
     ctx: Arc<TaskContext>,
-    _buffer: PhantomData<Buffer>,
+    buffer: Buffer,
 }
 
 pub enum InputKind {
@@ -44,13 +44,14 @@ impl<Buffer> MaterializeWrapper<Buffer> {
         input: InputKind,
         partition: usize,
         ctx: Arc<TaskContext>,
+        buffer: Buffer,
     ) -> Self {
         Self {
             factory,
-            _buffer: PhantomData::default(),
             input,
             partition,
             ctx,
+            buffer,
         }
     }
 }
@@ -109,10 +110,10 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         stream: SendableRecordBatchStream,
         _expr: Vec<PhysicalExprRef>,
     ) -> Result<()> {
-        let mut sink = Buffer::make_sink(stream.schema());
+        let mut sink = Buffer::make_sink(&mut self.buffer, stream.schema())?;
         Self::buffer(stream, &mut sink).await?;
-        let mut source = Buffer::make_source(sink);
-        let mut inputs = BasicStreamProvider::new([source.stream_unpartitioned().await]);
+        let mut source = Buffer::make_source(&mut self.buffer, sink)?;
+        let mut inputs = BasicStreamProvider::new([source.unpartitioned().await?]);
         let inner = self.factory.make(&mut inputs, self.partition, &self.ctx)?;
         Self::produce(inner, output).await?;
         Ok(())

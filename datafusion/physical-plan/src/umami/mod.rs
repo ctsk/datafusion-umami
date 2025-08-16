@@ -2,6 +2,7 @@
 
 mod buffer;
 mod factory;
+mod io;
 #[cfg(test)]
 mod tests;
 mod wrapper;

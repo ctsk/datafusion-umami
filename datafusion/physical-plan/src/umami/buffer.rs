@@ -8,8 +8,10 @@ use datafusion_execution::SendableRecordBatchStream;
 
 mod empty;
 mod memory;
+mod spill;
 
 pub use memory::MemoryBuffer;
+pub use spill::SpillBuffer;
 
 pub trait Sink {
     fn push(&mut self, batch: RecordBatch) -> impl Future<Output = Result<()>> + Send;
@@ -27,9 +29,9 @@ pub trait PartitionedSource {
 pub trait LazyPartitionedSource {
     type PartitionedSource: PartitionedSource;
 
-    fn stream_unpartitioned(
+    fn unpartitioned(
         &mut self,
-    ) -> impl Future<Output = SendableRecordBatchStream> + Send;
+    ) -> impl Future<Output = Result<SendableRecordBatchStream>> + Send;
 
     async fn into_partitioned(self) -> Self::PartitionedSource;
 }
@@ -38,6 +40,6 @@ pub trait LazyPartitionBuffer {
     type Sink: Sink + Send;
     type Source: LazyPartitionedSource + Send;
 
-    fn make_sink(schema: SchemaRef) -> Self::Sink;
-    fn make_source(sink: Self::Sink) -> Self::Source;
+    fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink>;
+    fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source>;
 }

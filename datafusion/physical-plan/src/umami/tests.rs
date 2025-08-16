@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::util::pretty::pretty_format_batches;
+use arrow_schema::SchemaRef;
 use datafusion_common::assert_batches_sorted_eq;
 use datafusion_common::record_batch;
 use datafusion_common::Result;
@@ -11,7 +12,12 @@ use futures::StreamExt;
 
 use crate::common::collect;
 use crate::joins::test_utils::compare_batches;
+use crate::metrics::ExecutionPlanMetricsSet;
+use crate::metrics::SpillMetrics;
+use crate::umami::buffer::LazyPartitionBuffer;
+use crate::umami::buffer::SpillBuffer;
 use crate::umami::wrapper::InputKind;
+use crate::SpillManager;
 use crate::{
     projection::ProjectionExec,
     test::TestMemoryExec,
@@ -19,8 +25,14 @@ use crate::{
     ExecutionPlan,
 };
 
-#[tokio::test]
-async fn test_buffer() -> Result<()> {
+trait BufferCreator {
+    fn new(
+        schema: SchemaRef,
+        ctx: Arc<TaskContext>,
+    ) -> impl LazyPartitionBuffer + Send + 'static;
+}
+
+async fn test_buffer_generic<T: BufferCreator>() -> Result<()> {
     let task_ctx = Arc::new(TaskContext::default());
     let batch = record_batch!(("nums", Int32, vec![Some(1), Some(10), Some(100)]))?;
     let schema = batch.schema();
@@ -42,7 +54,8 @@ async fn test_buffer() -> Result<()> {
 
     let factory = inner.execute_factory(0, Arc::clone(&task_ctx))?;
     let input = InputKind::unary(input_stream, vec![input_key]);
-    let wrapped = MaterializeWrapper::<MemoryBuffer>::new(factory, input, 0, task_ctx);
+    let buf = T::new(Arc::clone(&schema), Arc::clone(&task_ctx));
+    let wrapped = MaterializeWrapper::new(factory, input, 0, task_ctx, buf);
     let batches = collect(wrapped.stream()).await?;
 
     assert_batches_sorted_eq!(
@@ -59,4 +72,39 @@ async fn test_buffer() -> Result<()> {
     );
 
     Ok(())
+}
+
+#[tokio::test]
+async fn test_buffer_mem() -> Result<()> {
+    struct BC {}
+    impl BufferCreator for BC {
+        fn new(
+            schema: SchemaRef,
+            ctx: Arc<TaskContext>,
+        ) -> impl LazyPartitionBuffer + 'static {
+            MemoryBuffer::default()
+        }
+    }
+    test_buffer_generic::<BC>().await
+}
+
+#[tokio::test]
+async fn test_buffer_spill() -> Result<()> {
+    struct BC {}
+    impl BufferCreator for BC {
+        fn new(
+            schema: SchemaRef,
+            ctx: Arc<TaskContext>,
+        ) -> impl LazyPartitionBuffer + 'static {
+            let dummy_metrics = ExecutionPlanMetricsSet::new();
+            let manager = SpillManager::new(
+                ctx.runtime_env(),
+                SpillMetrics::new(&dummy_metrics, 0),
+                schema,
+            );
+
+            SpillBuffer::new(manager)
+        }
+    }
+    test_buffer_generic::<BC>().await
 }

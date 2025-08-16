@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
+use datafusion_common::Result;
 use datafusion_execution::SendableRecordBatchStream;
 
 use crate::EmptyRecordBatchStream;
@@ -27,8 +28,10 @@ impl super::PartitionedSource for EmptySource {
 impl super::LazyPartitionedSource for EmptySource {
     type PartitionedSource = EmptySource;
 
-    async fn stream_unpartitioned(&mut self) -> SendableRecordBatchStream {
-        Box::pin(EmptyRecordBatchStream::new(Arc::clone(&self.schema)))
+    async fn unpartitioned(&mut self) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
+            &self.schema,
+        ))))
     }
 
     async fn into_partitioned(self) -> Self::PartitionedSource {
