@@ -104,10 +104,17 @@ fn adjust_impl<BitSet: AdHocBitSet, Valid: Fn(usize) -> bool>(
         }
     }
 
+    let mut any_remap = false;
+
     for (dbi, buffer) in buffers.iter().enumerate() {
         if unsafe { bitset.get_bit(dbi) } {
             inner.remap[dbi] = add_buffer(inner, buffer);
+            any_remap |= inner.remap[dbi] != dbi as u32;
         }
+    }
+
+    if !any_remap {
+        return;
     }
 
     for (i, view_raw) in views.iter_mut().enumerate() {
