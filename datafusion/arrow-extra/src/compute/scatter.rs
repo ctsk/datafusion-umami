@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use datafusion_common::arrow::{
+use arrow::{
     array::{
         Array, ArrayRef, ArrowPrimitiveType, AsArray, ByteView, GenericByteViewArray,
         NullBufferBuilder, PrimitiveArray,
@@ -9,6 +9,8 @@ use datafusion_common::arrow::{
     datatypes::{ArrowNativeType, ByteViewType, DataType},
     downcast_primitive_array,
 };
+
+use crate::utils::BufferDedup;
 
 #[allow(unused)]
 pub fn scatter(
@@ -109,19 +111,7 @@ fn scatter_view<T: ByteViewType>(
     arrays: &[&GenericByteViewArray<T>],
 ) -> Vec<ArrayRef> {
     assert_eq!(indices.len(), arrays.len());
-    let mut out: Vec<_> = hist.iter().map(|i| Vec::with_capacity(*i)).collect();
-
-    let data_buffers: Vec<_> = arrays
-        .into_iter()
-        .flat_map(|a| a.data_buffers().iter().cloned())
-        .collect();
-
-    let mut adjust = 0;
-    for (array, indices) in arrays.into_iter().zip(indices.into_iter()) {
-        assert_eq!(indices.len(), array.len());
-        scatter_native_adjust_buffer(indices, &array.views(), &mut out, adjust);
-        adjust += array.data_buffers().len() as u32;
-    }
+    let mut out: Vec<_> = hist.iter().map(|l| Vec::with_capacity(*l)).collect();
 
     let nulls = if needs_scatter_nulls(arrays) {
         scatter_nulls_arr(indices, hist, arrays)
@@ -129,12 +119,32 @@ fn scatter_view<T: ByteViewType>(
         vec![None; hist.len()]
     };
 
+    let mut adjust = 0;
+    for (array, indices) in arrays.into_iter().zip(indices.into_iter()) {
+        assert_eq!(indices.len(), array.len());
+        scatter_native_adjust_buffer(indices, array.views(), &mut out, adjust);
+        adjust += array.data_buffers().len() as u32;
+    }
+
+    let all_data_buffers = arrays
+        .iter()
+        .flat_map(|a| a.data_buffers().iter())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut dedup =
+        BufferDedup::with_capacitites(all_data_buffers.len(), all_data_buffers.len());
+
     out.into_iter()
         .zip(nulls)
-        .map(|(values, nulls)| {
-            let b = ScalarBuffer::from(values);
+        .map(|(mut views, nulls)| {
+            dedup.adjust(&mut views, nulls.as_ref(), &all_data_buffers);
             Arc::new(unsafe {
-                GenericByteViewArray::<T>::new_unchecked(b, data_buffers.clone(), nulls)
+                GenericByteViewArray::<T>::new_unchecked(
+                    views.into(),
+                    dedup.finish(),
+                    nulls,
+                )
             }) as _
         })
         .collect()

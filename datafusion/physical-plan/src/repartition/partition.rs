@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
+use datafusion_arrow_extra::compute;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::Result;
 use datafusion_physical_expr::PhysicalExprRef;
@@ -89,8 +90,7 @@ fn partition(
             col_refs.push(batch.column(col).as_ref());
         }
 
-        let cols =
-            super::scatter::scatter(&hash_buffer[..batches.len()], &histogram, &col_refs);
+        let cols = compute::scatter(&hash_buffer[..batches.len()], &histogram, &col_refs);
 
         for (i, col) in cols.into_iter().enumerate() {
             out_columns[i].push(col)

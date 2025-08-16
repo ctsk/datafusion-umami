@@ -81,18 +81,26 @@ fn concat_reduce_views_impl<V: ByteViewType>(arrays: &[&dyn Array]) -> ArrayRef 
 
         views.extend_from_slice(array.views());
 
-        let adjust_views = dedup.buffer_count() > 0 && array.data_buffers().len() > 0;
-        if adjust_views {
-            let adjust_range = views.len() - array.len()..views.len();
-            let new_nulls = array.nulls().filter(|n| n.null_count() > 0);
-            dedup.adjust(&mut views[adjust_range], new_nulls, array.data_buffers());
+        if array.data_buffers().len() == 0 {
+            continue;
         }
+
+        if dedup.buffer_count() == 0 {
+            for buffer in array.data_buffers() {
+                dedup.add_buffer(buffer);
+            }
+            continue;
+        }
+
+        let adjust_range = views.len() - array.len()..views.len();
+        let new_nulls = array.nulls().filter(|n| n.null_count() > 0);
+        dedup.adjust(&mut views[adjust_range], new_nulls, array.data_buffers());
     }
 
     Arc::new(unsafe {
         GenericByteViewArray::<V>::new_unchecked(
             views.into(),
-            dedup.take(),
+            dedup.finish(),
             nulls.finish(),
         )
     })

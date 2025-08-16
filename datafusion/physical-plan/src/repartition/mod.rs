@@ -63,7 +63,6 @@ use parking_lot::Mutex;
 
 mod distributor_channels;
 mod partition;
-mod scatter;
 
 type MaybeBatch = Option<Result<RecordBatch>>;
 type InputPartitionsToCurrentPartitionSender = Vec<DistributionSender<MaybeBatch>>;

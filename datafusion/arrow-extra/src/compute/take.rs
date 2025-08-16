@@ -48,9 +48,8 @@ fn take_reduce_views_impl<V: ByteViewType, T: ArrowPrimitiveType>(
 
     let mut buffer_dedup = BufferDedup::new(&[array]);
     buffer_dedup.adjust(&mut new_views, new_nulls.as_ref(), array.data_buffers());
-    let new_buffers = buffer_dedup.take();
+    let new_buffers = buffer_dedup.finish();
 
-    // Safety:  array.views was valid, and take_native copies only valid values, and verifies bounds
     Ok(Arc::new(unsafe {
         GenericByteViewArray::<V>::new_unchecked(new_views.into(), new_buffers, new_nulls)
     }))
