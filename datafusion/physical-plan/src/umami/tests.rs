@@ -15,8 +15,10 @@ use crate::joins::test_utils::compare_batches;
 use crate::metrics::ExecutionPlanMetricsSet;
 use crate::metrics::SpillMetrics;
 use crate::umami::buffer::LazyPartitionBuffer;
+use crate::umami::buffer::PartitionMemoryBuffer;
 use crate::umami::buffer::SpillBuffer;
 use crate::umami::wrapper::InputKind;
+use crate::utils::RowExpr;
 use crate::SpillManager;
 use crate::{
     projection::ProjectionExec,
@@ -104,6 +106,22 @@ async fn test_buffer_spill() -> Result<()> {
             );
 
             SpillBuffer::new(manager)
+        }
+    }
+    test_buffer_generic::<BC>().await
+}
+
+#[tokio::test]
+async fn test_buffer_mem_partition() -> Result<()> {
+    struct BC {}
+    impl BufferCreator for BC {
+        fn new(
+            schema: SchemaRef,
+            ctx: Arc<TaskContext>,
+        ) -> impl LazyPartitionBuffer + 'static {
+            let name = schema.field(0).name();
+            let keys: RowExpr = [col(name, &schema).unwrap()].into_iter().collect();
+            PartitionMemoryBuffer::new_random(keys, 4)
         }
     }
     test_buffer_generic::<BC>().await

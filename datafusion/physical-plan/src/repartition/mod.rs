@@ -38,6 +38,7 @@ use crate::repartition::distributor_channels::{
 };
 use crate::sorts::streaming_merge::StreamingMergeBuilder;
 use crate::stream::RecordBatchStreamAdapter;
+use crate::utils::RowExpr;
 use crate::{DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties, Statistics};
 
 use arrow::array::RecordBatch;
@@ -63,6 +64,8 @@ use parking_lot::Mutex;
 
 mod distributor_channels;
 mod partition;
+
+pub(crate) use partition::Partitioner;
 
 type MaybeBatch = Option<Result<RecordBatch>>;
 type InputPartitionsToCurrentPartitionSender = Vec<DistributionSender<MaybeBatch>>;
@@ -256,7 +259,7 @@ pub struct BatchPartitioner {
 
 enum BatchPartitionerState {
     Hash {
-        partitioner: partition::Partitioner,
+        partitioner: Partitioner,
         num_partitions: usize,
         batches_buffer: Vec<RecordBatch>,
     },
@@ -279,8 +282,8 @@ impl BatchPartitioner {
                 }
             }
             Partitioning::Hash(exprs, num_partitions) => BatchPartitionerState::Hash {
-                partitioner: partition::Partitioner::new(
-                    exprs,
+                partitioner: Partitioner::new(
+                    exprs.into_iter().collect::<RowExpr>(),
                     ahash::RandomState::with_seeds(0, 0, 0, 0),
                     num_partitions,
                 ),

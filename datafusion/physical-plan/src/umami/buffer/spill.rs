@@ -46,6 +46,10 @@ impl LazyPartitionBuffer for SpillBuffer {
             spill_file,
         })
     }
+
+    fn partition_count(&self) -> usize {
+        0
+    }
 }
 
 pub struct SpillSink {
@@ -77,7 +81,7 @@ impl super::LazyPartitionedSource for SpillSource {
         }
     }
 
-    async fn into_partitioned(self) -> Self::PartitionedSource {
+    fn into_partitioned(self) -> Self::PartitionedSource {
         super::empty::EmptySource::new(self.schema)
     }
 }

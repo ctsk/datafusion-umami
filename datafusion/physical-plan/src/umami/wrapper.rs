@@ -3,7 +3,10 @@ use std::{marker::PhantomData, mem, sync::Arc};
 use crate::{
     stream::RecordBatchStreamAdapter,
     umami::{
-        buffer::{LazyPartitionBuffer, LazyPartitionedSource, Sink},
+        buffer::{
+            LazyPartitionBuffer, LazyPartitionedSource, PartitionIdx, PartitionedSource,
+            Sink,
+        },
         BasicStreamProvider,
     },
 };
@@ -85,6 +88,16 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         Ok(())
     }
 
+    async fn assemble_and_produce(
+        &mut self,
+        mut input: SendableRecordBatchStream,
+        output: &mut Output,
+    ) -> Result<()> {
+        let mut inputs = BasicStreamProvider::new([input]);
+        let inner = self.factory.make(&mut inputs, self.partition, &self.ctx)?;
+        Self::produce(inner, output).await
+    }
+
     async fn buffer(
         mut stream: SendableRecordBatchStream,
         sink: &mut Buffer::Sink,
@@ -113,9 +126,16 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         let mut sink = Buffer::make_sink(&mut self.buffer, stream.schema())?;
         Self::buffer(stream, &mut sink).await?;
         let mut source = Buffer::make_source(&mut self.buffer, sink)?;
-        let mut inputs = BasicStreamProvider::new([source.unpartitioned().await?]);
-        let inner = self.factory.make(&mut inputs, self.partition, &self.ctx)?;
-        Self::produce(inner, output).await?;
+        Self::assemble_and_produce(&mut self, source.unpartitioned().await?, output)
+            .await?;
+
+        if self.buffer.partition_count() > 0 {
+            let mut source = source.into_partitioned();
+            for partition in 0..self.buffer.partition_count() {
+                let stream = source.stream_partition(PartitionIdx(partition)).await;
+                Self::assemble_and_produce(&mut self, stream, output).await?;
+            }
+        }
         Ok(())
     }
 }

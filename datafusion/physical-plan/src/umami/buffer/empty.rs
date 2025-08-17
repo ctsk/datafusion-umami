@@ -34,7 +34,7 @@ impl super::LazyPartitionedSource for EmptySource {
         ))))
     }
 
-    async fn into_partitioned(self) -> Self::PartitionedSource {
+    fn into_partitioned(self) -> Self::PartitionedSource {
         self
     }
 }

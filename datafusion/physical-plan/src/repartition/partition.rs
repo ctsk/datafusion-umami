@@ -4,13 +4,14 @@ use arrow::array::RecordBatch;
 use datafusion_arrow_extra::compute;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::Result;
-use datafusion_physical_expr::PhysicalExprRef;
+
+use crate::utils::RowExpr;
 
 /// Partitions n batches into n partitions with the given keys and hash seed
 ///
 /// maintains internal buffers to avoid allocations
 pub struct Partitioner {
-    key: Box<[PhysicalExprRef]>,
+    key: RowExpr,
     random_state: ahash::RandomState,
     hash_buffer: Vec<Vec<u64>>,
     histogram: Vec<usize>,
@@ -18,7 +19,7 @@ pub struct Partitioner {
 
 impl Partitioner {
     pub fn new(
-        key: impl Into<Box<[PhysicalExprRef]>>,
+        key: impl Into<RowExpr>,
         random_state: ahash::RandomState,
         num_partitions: usize,
     ) -> Self {
@@ -31,7 +32,7 @@ impl Partitioner {
     }
 
     pub fn partition(&mut self, batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
-        partition(
+        scatter_partition(
             &self.key,
             batches,
             &self.random_state,
@@ -41,8 +42,8 @@ impl Partitioner {
     }
 }
 
-fn partition(
-    key: &[PhysicalExprRef],
+fn scatter_partition(
+    key: &RowExpr,
     batches: &[RecordBatch],
     random_state: &ahash::RandomState,
     hash_buffer: &mut [Vec<u64>],
@@ -56,12 +57,8 @@ fn partition(
     let num_batches = batches.len();
 
     histogram.fill(0);
-    let mut keys = Vec::new();
     for (bi, batch) in batches.iter().enumerate() {
-        keys.clear();
-        for expr in key {
-            keys.push(expr.evaluate(batch)?.into_array(batch.num_rows())?);
-        }
+        let keys = key.evaluate_to_array(batch)?;
 
         hash_buffer[bi].resize(batch.num_rows(), 0);
         create_hashes(&keys, &random_state, &mut hash_buffer[bi])?;

@@ -11,29 +11,30 @@ mod memory;
 mod spill;
 
 pub use memory::MemoryBuffer;
+pub use memory::PartitionMemoryBuffer;
 pub use spill::SpillBuffer;
+
+pub struct PartitionIdx(pub usize);
 
 pub trait Sink {
     fn push(&mut self, batch: RecordBatch) -> impl Future<Output = Result<()>> + Send;
 }
 
-pub struct PartitionIdx(pub u32);
-
 pub trait PartitionedSource {
-    async fn stream_partition(
+    fn stream_partition(
         &mut self,
         index: PartitionIdx,
-    ) -> SendableRecordBatchStream;
+    ) -> impl Future<Output = SendableRecordBatchStream> + Send;
 }
 
 pub trait LazyPartitionedSource {
-    type PartitionedSource: PartitionedSource;
+    type PartitionedSource: PartitionedSource + Send;
 
     fn unpartitioned(
         &mut self,
     ) -> impl Future<Output = Result<SendableRecordBatchStream>> + Send;
 
-    async fn into_partitioned(self) -> Self::PartitionedSource;
+    fn into_partitioned(self) -> Self::PartitionedSource;
 }
 
 pub trait LazyPartitionBuffer {
@@ -42,4 +43,5 @@ pub trait LazyPartitionBuffer {
 
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink>;
     fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source>;
+    fn partition_count(&self) -> usize;
 }
