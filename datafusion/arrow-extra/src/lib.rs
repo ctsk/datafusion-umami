@@ -1,2 +1,2 @@
 pub mod compute;
-mod utils;
+pub mod utils;
