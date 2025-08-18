@@ -2,16 +2,17 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        Array, ArrayRef, ArrowPrimitiveType, AsArray, ByteView, GenericByteViewArray,
-        NullBufferBuilder, PrimitiveArray,
+        Array, ArrayRef, ArrowPrimitiveType, AsArray, ByteView, GenericByteArray,
+        GenericByteViewArray, NullBufferBuilder, PrimitiveArray,
     },
-    buffer::{NullBuffer, ScalarBuffer},
-    datatypes::{ArrowNativeType, ByteViewType, DataType},
+    buffer::{NullBuffer, OffsetBuffer, ScalarBuffer},
+    datatypes::{ArrowNativeType, ByteArrayType, ByteViewType, DataType},
     downcast_primitive_array,
 };
 
 use crate::utils::BufferDedup;
 
+#[rustfmt::skip]
 #[allow(unused)]
 pub fn scatter(
     indices: &[Vec<u64>],
@@ -23,12 +24,12 @@ pub fn scatter(
         arr => {
             scatter_primitive::<_, false>(indices, hist, &to(arr, array))
         }
-        DataType::Utf8View => {
-            scatter_view(indices, hist, &to(arr.as_string_view(), array))
-        }
-        DataType::BinaryView => {
-            scatter_view(indices, hist, &to(arr.as_binary_view(), array))
-        }
+        DataType::Utf8View => scatter_view(indices, hist, &to(arr.as_string_view(), array)),
+        DataType::BinaryView => scatter_view(indices, hist, &to(arr.as_binary_view(), array)),
+        DataType::Utf8 => scatter_bytes(indices, hist, &to(arr.as_string::<i32>(), array)),
+        DataType::LargeUtf8 => scatter_bytes(indices, hist, &to(arr.as_string::<i64>(), array)),
+        DataType::Binary => scatter_bytes(indices, hist, &to(arr.as_binary::<i32>(), array)),
+        DataType::LargeBinary => scatter_bytes(indices, hist, &to(arr.as_binary::<i64>(), array)),
         _ => {
             todo!()
         }
@@ -146,6 +147,75 @@ fn scatter_view<T: ByteViewType>(
                     nulls,
                 )
             }) as _
+        })
+        .collect()
+}
+
+#[inline(never)]
+fn compute_data_size<T: ByteArrayType>(
+    indices: &[u64],
+    array: &GenericByteArray<T>,
+    data_hist: &mut [usize],
+) {
+    for (i, dst) in indices.iter().enumerate() {
+        unsafe {
+            let raw: &[u8] = array.value_unchecked(i).as_ref();
+            *data_hist.get_unchecked_mut(*dst as usize) += raw.len();
+        }
+    }
+}
+
+#[inline(never)]
+fn scatter_bytes<T: ByteArrayType>(
+    indices: &[Vec<u64>],
+    hist: &[usize],
+    arrays: &[&GenericByteArray<T>],
+) -> Vec<ArrayRef> {
+    // 1. Compute size of the data section of each output array
+    let mut data_hist = vec![0; hist.len()];
+    for (indices, array) in indices.iter().zip(arrays.iter()) {
+        compute_data_size(indices, array, &mut data_hist);
+    }
+
+    let mut out = Vec::from_iter(
+        hist.iter()
+            .zip(data_hist.iter())
+            .map(|(ol, dl)| (Vec::with_capacity(*ol + 1), Vec::with_capacity(*dl))),
+    );
+
+    for (ol, _) in out.iter_mut() {
+        ol.push(unsafe { T::Offset::from_usize(0).unwrap_unchecked() });
+    }
+
+    for (indices, array) in indices.iter().zip(arrays.iter()) {
+        for (i, dst) in indices.iter().enumerate() {
+            unsafe {
+                let (offset, data) = out.get_unchecked_mut(*dst as usize);
+                let raw: &[u8] = array.value_unchecked(i).as_ref();
+                let pos = offset.len();
+                offset.set_len(pos + 1);
+                *offset.get_unchecked_mut(pos) = *offset.get_unchecked(pos - 1)
+                    + T::Offset::from_usize(raw.len()).unwrap_unchecked();
+                data.extend_from_slice(raw);
+            }
+        }
+    }
+
+    let nulls = if needs_scatter_nulls(arrays) {
+        scatter_nulls_arr(indices, hist, arrays)
+    } else {
+        vec![None; hist.len()]
+    };
+
+    out.into_iter()
+        .zip(nulls.into_iter())
+        .map(|((offsets, data), nulls)| unsafe {
+            let offsets = OffsetBuffer::new_unchecked(offsets.into());
+            Arc::new(GenericByteArray::<T>::new_unchecked(
+                offsets,
+                data.into(),
+                nulls,
+            )) as _
         })
         .collect()
 }
