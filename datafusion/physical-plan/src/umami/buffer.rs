@@ -6,10 +6,13 @@ use arrow_schema::SchemaRef;
 use datafusion_common::Result;
 use datafusion_execution::SendableRecordBatchStream;
 
+mod adaptive;
 mod empty;
 mod memory;
 mod spill;
 
+pub use adaptive::AdaptiveBuffer;
+pub use adaptive::AdaptiveSinkConfig;
 pub use memory::MemoryBuffer;
 pub use memory::PartitionMemoryBuffer;
 pub use spill::SpillBuffer;

@@ -63,6 +63,20 @@ pub struct MemorySource {
     partitioned: Vec<Vec<RecordBatch>>,
 }
 
+impl MemorySource {
+    pub fn new(
+        schema: SchemaRef,
+        unpartitioned: Vec<RecordBatch>,
+        partitioned: Vec<Vec<RecordBatch>>,
+    ) -> Self {
+        Self {
+            schema,
+            unpartitioned,
+            partitioned,
+        }
+    }
+}
+
 impl super::LazyPartitionedSource for MemorySource {
     type PartitionedSource = Self;
 
