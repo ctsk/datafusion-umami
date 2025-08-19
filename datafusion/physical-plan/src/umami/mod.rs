@@ -10,3 +10,6 @@ mod wrapper;
 pub use factory::BasicStreamProvider;
 pub use factory::StreamFactory;
 pub use factory::StreamProvider;
+use io::spill::InProgressSpillFileWithParts;
+use io::AsyncBatchWriter;
+use io::BatchWriter;

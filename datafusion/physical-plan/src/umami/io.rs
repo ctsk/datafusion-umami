@@ -2,23 +2,45 @@ use arrow::record_batch::RecordBatch;
 use datafusion_common::Result;
 use datafusion_execution::disk_manager::RefCountedTempFile;
 
-mod spill;
+pub mod pinned_writer;
+pub mod spill;
 
-trait BatchWriter {
+pub trait BatchWriter {
+    type Intermediate: Send;
+
     fn write(&mut self, batch: &RecordBatch) -> Result<()>;
-    fn finish(&mut self) -> Result<Option<RefCountedTempFile>>;
+    fn finish(&mut self) -> Result<Self::Intermediate>;
 }
 
-trait PartitionedBatchWriter {
+pub trait AsyncBatchWriter {
+    type Intermediate: Send;
+
+    async fn write(&mut self, batch: RecordBatch, part: usize) -> Result<()>;
+    async fn finish(&mut self) -> Result<Self::Intermediate>;
+}
+
+pub trait PartitionedBatchWriter {
+    type Intermediate: Send;
+
     fn write(&mut self, batch: &RecordBatch, partition: usize) -> Result<()>;
+    fn finish(&mut self) -> Result<Self::Intermediate>;
 }
 
-struct AutoPartitionedBatchWriter<BatchWriter> {
+pub struct AutoPartitionedBatchWriter<BatchWriter> {
     inner: Vec<BatchWriter>,
 }
 
 impl<T: BatchWriter> PartitionedBatchWriter for AutoPartitionedBatchWriter<T> {
+    type Intermediate = Vec<T::Intermediate>;
+
     fn write(&mut self, batch: &RecordBatch, partition: usize) -> Result<()> {
         self.inner[partition].write(batch)
+    }
+
+    fn finish(&mut self) -> Result<Self::Intermediate> {
+        self.inner
+            .iter_mut()
+            .map(|writer| writer.finish())
+            .collect()
     }
 }

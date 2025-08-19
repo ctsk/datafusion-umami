@@ -125,7 +125,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
     ) -> Result<()> {
         let mut sink = Buffer::make_sink(&mut self.buffer, stream.schema())?;
         Self::buffer(stream, &mut sink).await?;
-        let mut source = Buffer::make_source(&mut self.buffer, sink)?;
+        let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
         Self::assemble_and_produce(&mut self, source.unpartitioned().await?, output)
             .await?;
 

@@ -118,7 +118,7 @@ impl LazyPartitionBuffer for AdaptiveBuffer {
         ))
     }
 
-    fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
+    async fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
         Ok(super::memory::MemorySource::new(
             Arc::clone(&self.schema),
             sink.unpartitioned,

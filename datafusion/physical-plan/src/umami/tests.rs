@@ -100,7 +100,7 @@ async fn roundtrip<T: BufferCreator>(data: Vec<RecordBatch>) -> Result<()> {
         sink.push(batch.clone()).await?;
     }
     T::post_sink(&sink);
-    let mut source = buf.make_source(sink)?;
+    let mut source = buf.make_source(sink).await?;
 
     let mut out = Vec::new();
     let mut unpartitioned: Vec<RecordBatch> =

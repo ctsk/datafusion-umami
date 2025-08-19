@@ -36,7 +36,7 @@ impl LazyPartitionBuffer for SpillBuffer {
         Ok(Self::Sink { schema, writer })
     }
 
-    fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
+    async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
         let schema = sink.schema;
         let manager = Arc::clone(&self.manager);
         let spill_file = sink.writer.finish()?;
@@ -67,6 +67,20 @@ pub struct SpillSource {
     schema: SchemaRef,
     manager: Arc<SpillManager>,
     spill_file: Option<RefCountedTempFile>,
+}
+
+impl SpillSource {
+    pub fn new(
+        schema: SchemaRef,
+        manager: Arc<SpillManager>,
+        spill_file: Option<RefCountedTempFile>,
+    ) -> Self {
+        Self {
+            schema,
+            manager,
+            spill_file,
+        }
+    }
 }
 
 impl super::LazyPartitionedSource for SpillSource {

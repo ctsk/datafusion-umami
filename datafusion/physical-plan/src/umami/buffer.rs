@@ -7,6 +7,7 @@ use datafusion_common::Result;
 use datafusion_execution::SendableRecordBatchStream;
 
 mod adaptive;
+mod async_spill;
 mod empty;
 mod memory;
 mod spill;
@@ -45,6 +46,9 @@ pub trait LazyPartitionBuffer {
     type Source: LazyPartitionedSource + Send;
 
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink>;
-    fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source>;
+    fn make_source(
+        &mut self,
+        sink: Self::Sink,
+    ) -> impl Future<Output = Result<Self::Source>> + Send;
     fn partition_count(&self) -> usize;
 }

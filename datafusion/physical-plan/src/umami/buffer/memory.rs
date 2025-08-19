@@ -127,7 +127,7 @@ impl LazyPartitionBuffer for MemoryBuffer {
         })
     }
 
-    fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
+    async fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
         Ok(MemorySource {
             schema: sink.schema,
             unpartitioned: sink.buffers,
@@ -173,7 +173,7 @@ impl LazyPartitionBuffer for PartitionMemoryBuffer {
         ))
     }
 
-    fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
+    async fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
         Ok(MemorySource {
             schema: sink.schema,
             unpartitioned: vec![],
