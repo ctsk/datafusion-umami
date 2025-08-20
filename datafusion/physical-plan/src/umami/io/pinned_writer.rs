@@ -6,11 +6,19 @@ use tokio::sync::{mpsc, oneshot};
 use crate::umami::io::{AsyncBatchWriter, BatchWriter, PartitionedBatchWriter};
 use datafusion_common::{DataFusionError, Result};
 
-pub fn make_pinned<Inner: PartitionedBatchWriter + Send + 'static>(
-    inner: Inner,
-) -> PinnedHandle<Inner> {
+pub fn make_pinned<Inner, F>(inner: F) -> PinnedHandle<Inner>
+where
+    Inner: PartitionedBatchWriter + 'static,
+    F: Send + 'static + FnOnce() -> Inner,
+{
     let (sender, recv) = mpsc::channel(2);
-    let actor = std::thread::spawn(move || Actor { recv, inner }.launch());
+    let actor = std::thread::spawn(move || {
+        Actor {
+            recv,
+            inner: inner(),
+        }
+        .launch()
+    });
     PinnedHandle { sender, actor }
 }
 

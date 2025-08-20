@@ -19,6 +19,7 @@ use crate::metrics::ExecutionPlanMetricsSet;
 use crate::metrics::SpillMetrics;
 use crate::umami::buffer::AdaptiveBuffer;
 use crate::umami::buffer::AdaptiveSinkConfig;
+use crate::umami::buffer::IoUringSpillBuffer;
 use crate::umami::buffer::LazyPartitionBuffer;
 use crate::umami::buffer::LazyPartitionedSource;
 use crate::umami::buffer::PartitionIdx;
@@ -179,6 +180,36 @@ async fn test_adaptive_buffer() -> Result<()> {
                 .schema(schema)
                 .sink_config(config)
                 .build()
+        }
+    }
+    test_buffer_generic::<BC>().await?;
+    let rb = record_batch!(
+        ("num", Int32, Vec::from_iter(0..100)),
+        (
+            "val",
+            Utf8,
+            Vec::from_iter((0..100).map(|v| format!("value_{v}")))
+        )
+    )?;
+    let rb = vec![rb; 10];
+    roundtrip::<BC>(rb).await
+}
+
+#[tokio::test]
+async fn test_buffer_uring() -> Result<()> {
+    struct BC {}
+    impl BufferCreator for BC {
+        type Buf = IoUringSpillBuffer;
+        fn new(schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
+            let name = schema.field(0).name();
+            let keys: RowExpr = [col(name, &schema).unwrap()].into_iter().collect();
+            let config = AdaptiveSinkConfig { partition_start: 1 };
+            IoUringSpillBuffer::new(
+                ctx.runtime_env()
+                    .disk_manager
+                    .create_tmp_file(IoUringSpillBuffer::NAME)
+                    .unwrap(),
+            )
         }
     }
     test_buffer_generic::<BC>().await?;

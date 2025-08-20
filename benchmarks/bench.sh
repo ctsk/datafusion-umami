@@ -211,6 +211,9 @@ main() {
                     # same data as for tpch10
                     data_tpch "10"
                     ;;
+                tpch100)
+                    data_tpch "100"
+                    ;;
                 clickbench_1)
                     data_clickbench_1
                     ;;
@@ -372,6 +375,9 @@ main() {
                     ;;
                 tpch_mem10)
                     run_tpch_mem "10"
+                    ;;
+                tpch100)
+                    run_tpch "100" "parquet"
                     ;;
                 cancellation)
                     run_cancellation

@@ -2,8 +2,13 @@ use arrow::record_batch::RecordBatch;
 use datafusion_common::Result;
 use datafusion_execution::disk_manager::RefCountedTempFile;
 
+pub(super) mod aligned_ipc;
 pub mod pinned_writer;
+mod pool;
 pub mod spill;
+#[cfg(test)]
+mod tests;
+pub mod uring;
 
 pub trait BatchWriter {
     type Intermediate: Send;

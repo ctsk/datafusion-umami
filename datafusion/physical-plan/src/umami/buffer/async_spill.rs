@@ -42,7 +42,7 @@ impl LazyPartitionBuffer for AsyncSpillBuffer {
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
         let ipsf = self.manager.create_in_progress_file(NAME)?;
         let ipsfwp = InProgressSpillFileWithParts::new(ipsf);
-        let writer = make_pinned(ipsfwp);
+        let writer = make_pinned(|| ipsfwp);
         Ok(Self::Sink { schema, writer })
     }
 

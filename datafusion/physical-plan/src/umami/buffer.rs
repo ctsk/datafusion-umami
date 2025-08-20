@@ -11,12 +11,14 @@ mod async_spill;
 mod empty;
 mod memory;
 mod spill;
+mod uring_spill;
 
 pub use adaptive::AdaptiveBuffer;
 pub use adaptive::AdaptiveSinkConfig;
 pub use memory::MemoryBuffer;
 pub use memory::PartitionMemoryBuffer;
 pub use spill::SpillBuffer;
+pub use uring_spill::IoUringSpillBuffer;
 
 pub struct PartitionIdx(pub usize);
 

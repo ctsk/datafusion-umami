@@ -1,0 +1,10 @@
+[package]
+name = "io-uring-async"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+io-uring = { workspace = true }
+send_wrapper = { version = "0.6.0" }
+slab = { version = "0.4" }
+tokio = { workspace = true, features = ["net"] }

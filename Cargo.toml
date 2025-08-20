@@ -39,6 +39,7 @@ members = [
     "datafusion/functions-nested",
     "datafusion/functions-window",
     "datafusion/functions-window-common",
+    "datafusion/io-uring-async",
     "datafusion/optimizer",
     "datafusion/physical-expr",
     "datafusion/physical-expr-common",
@@ -154,6 +155,7 @@ half = { version = "2.6.0", default-features = false }
 hashbrown = { version = "0.14.5", features = ["raw"] }
 hex = { version = "0.4.3" }
 indexmap = "2.10.0"
+io-uring-async = { path = "datafusion/io-uring-async", version = "0.1.0" }
 itertools = "0.14"
 log = "^0.4"
 object_store = { version = "0.12.3", default-features = false }
@@ -168,6 +170,7 @@ pbjson = { version = "0.7.0" }
 pbjson-types = "0.7"
 # Should match arrow-flight's version of prost.
 insta = { version = "1.43.1", features = ["glob", "filters"] }
+io-uring = "0.7.9"
 prost = "0.13.1"
 rand = "0.9"
 recursive = "0.1.1"
@@ -218,7 +221,9 @@ debug = true
 strip = false
 
 [profile.profiling-nonlto]
-inherits = "profiling"
+inherits = "release"
+debug = true
+strip = false
 lto = false
 
 [workspace.lints.clippy]

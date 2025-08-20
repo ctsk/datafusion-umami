@@ -63,10 +63,15 @@ genawaiter = { version = "0.99.1", features = ["futures03"] }
 half = { workspace = true }
 hashbrown = { workspace = true }
 indexmap = { workspace = true }
+io-uring = { workspace = true }
+io-uring-async = { workspace = true }
 itertools = { workspace = true, features = ["use_std"] }
+libc = "0.2.175"
 log = { workspace = true }
+memmap2 = "0.9.7"
 parking_lot = { workspace = true }
 pin-project-lite = "^0.2.7"
+send_wrapper = "0.6.0"
 tokio = { workspace = true }
 
 [dev-dependencies]
