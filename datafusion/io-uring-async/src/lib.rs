@@ -142,8 +142,9 @@ impl<S: squeue::Entry, C: cqueue::Entry> IoUringAsync<S, C> {
         let mut guard = self.slab.borrow_mut();
         let index = guard.insert(Lifecycle::Submitted);
         let entry = entry.into().user_data(index.try_into().unwrap());
+        unsafe { self.uring.submission_shared().sync() };
         while unsafe { self.uring.submission_shared().push(&entry).is_err() } {
-            self.uring.submit().unwrap();
+            self.uring.submit_and_wait(1).unwrap();
         }
         Op {
             inner: Some(OpInner {
