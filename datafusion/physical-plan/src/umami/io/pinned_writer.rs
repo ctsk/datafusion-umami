@@ -3,7 +3,7 @@ use std::thread::JoinHandle;
 use arrow::array::RecordBatch;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::umami::io::{AsyncBatchWriter, BatchWriter, PartitionedBatchWriter};
+use crate::umami::io::{AsyncBatchWriter, PartitionedBatchWriter};
 use datafusion_common::{DataFusionError, Result};
 
 pub fn make_pinned<Inner, F>(inner: F) -> PinnedHandle<Inner>
@@ -32,11 +32,14 @@ impl<Inner: PartitionedBatchWriter> AsyncBatchWriter for PinnedHandle<Inner> {
 
     async fn write(&mut self, batch: RecordBatch, part: usize) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(Message::Write {
-            batch: batch,
-            part: part,
-            reply: tx,
-        });
+        self.sender
+            .send(Message::Write {
+                batch: batch,
+                part: part,
+                reply: tx,
+            })
+            .await
+            .expect("Lost contact to writer");
 
         rx.await
             .map_err(|recv_err| DataFusionError::Execution(recv_err.to_string()))?
@@ -44,7 +47,10 @@ impl<Inner: PartitionedBatchWriter> AsyncBatchWriter for PinnedHandle<Inner> {
 
     async fn finish(&mut self) -> Result<Self::Intermediate> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(Message::Finish { reply: tx });
+        self.sender
+            .send(Message::Finish { reply: tx })
+            .await
+            .expect("Lost onctact to writer :/");
         rx.await
             .map_err(|recv_err| DataFusionError::Execution(recv_err.to_string()))?
     }
@@ -71,10 +77,10 @@ impl<Inner: PartitionedBatchWriter> Actor<Inner> {
         while let Some(msg) = self.recv.blocking_recv() {
             match msg {
                 Message::Write { batch, part, reply } => {
-                    reply.send(self.inner.write(&batch, part));
+                    let _ = reply.send(self.inner.write(&batch, part));
                 }
                 Message::Finish { reply } => {
-                    reply.send(self.inner.finish());
+                    let _ = reply.send(self.inner.finish());
                 }
             }
         }

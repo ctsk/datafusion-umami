@@ -1,9 +1,5 @@
 use std::{
-    ops::Range,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
-    path::PathBuf,
-    ptr::NonNull,
-    rc::Rc,
+    cell::RefCell, ops::Range, os::fd::AsRawFd, path::PathBuf, ptr::NonNull, rc::Rc,
     sync::Arc,
 };
 
@@ -17,7 +13,6 @@ use datafusion_common::Result;
 use datafusion_execution::SendableRecordBatchStream;
 use io_uring::{opcode, types};
 use io_uring_async::IoUringAsync;
-use send_wrapper::SendWrapper;
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::{
@@ -90,32 +85,32 @@ impl PinnedReader {
     }
 
     async fn decode_and_send(
-        schema: SchemaRef,
+        decoder: Rc<RefCell<FileDecoder>>,
         batches: Rc<Vec<BatchBlocks>>,
         block_range: Range<usize>,
         mut page: SendablePage,
         loc: Loc,
-        mut sender: mpsc::Sender<Result<RecordBatch>>,
+        sender: mpsc::Sender<Result<RecordBatch>>,
     ) -> Result<()> {
         assert!(!page.as_mut_ptr().is_null());
         let nn = unsafe { NonNull::new_unchecked(page.as_mut_ptr()) };
         let buffer =
             unsafe { Buffer::from_custom_allocation(nn, loc.length, Arc::new(page)) };
-        let mut decoder = Self::make_decoder(schema);
         for batch_blocks in &batches[block_range] {
             for dict in batch_blocks.dicts.iter() {
                 let buf = buffer.slice_with_length(
                     dict.offset - loc.file_offset,
                     dict.meta_length + dict.data_length,
                 );
-                decoder.read_dictionary(&dict.to_ipc(), &buf)?;
+                decoder.borrow_mut().read_dictionary(&dict.to_ipc(), &buf)?;
             }
 
-            let offset = batch_blocks.batch.offset - loc.file_offset;
-            let length = batch_blocks.batch.meta_length + batch_blocks.batch.data_length;
-            let buf = buffer.slice_with_length(offset, length);
+            let mut block = batch_blocks.batch.clone();
+            block.offset -= loc.file_offset;
+            let buf = buffer.slice_with_length(block.offset, block.length());
             let result = Ok(decoder
-                .read_record_batch(&batch_blocks.batch.to_ipc(), &buf)
+                .borrow()
+                .read_record_batch(&block.to_ipc(), &buf)
                 .transpose()
                 .unwrap()?);
             sender.send(result).await.unwrap()
@@ -123,28 +118,29 @@ impl PinnedReader {
         Ok(())
     }
 
-    pub fn launch(mut self, mut sender: mpsc::Sender<Result<RecordBatch>>) -> Result<()> {
+    pub fn launch(self, sender: mpsc::Sender<Result<RecordBatch>>) -> Result<()> {
         let uring = IoUringAsync::new(self.depth).unwrap();
         let uring = Rc::new(uring);
         let file = std::fs::OpenOptions::new()
             .create(false)
             .read(true)
-            .custom_flags(libc::O_DIRECT)
             .open(&self.path)?;
 
         // Create a new current_thread runtime that submits all outstanding submission queue
         // entries as soon as the executor goes idle.
-        let uring_clone = SendWrapper::new(uring.clone());
+        let uring_clone = super::RefSendWrapper::new(uring.clone());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .on_thread_park(move || {
-                uring_clone.submit().unwrap();
+                uring_clone.as_ref().submit().unwrap();
             })
             .enable_all()
             .build()
             .unwrap();
 
+        let decoder = Rc::new(RefCell::new(Self::make_decoder(Arc::clone(&self.schema))));
+
         let pool = Arc::new(SendablePool::new(super::BATCH_UPPER_BOUND));
-        let limiter = Arc::new(Semaphore::new(self.depth as usize));
+        let limiter = Arc::new(Semaphore::new(self.depth as usize * 2));
 
         runtime.block_on(async move {
             tokio::task::LocalSet::new()
@@ -155,7 +151,6 @@ impl PinnedReader {
                     let mut last_offset = 0;
                     for loc in self.offsets {
                         let permit = Arc::clone(&limiter).acquire_owned().await.unwrap();
-                        let batches = &self.batches[last_offset..loc.batch_blocks_offset];
                         let mut page = pool.issue_page();
                         assert!(page.as_mut_ptr() as usize % DIRECT_IO_ALIGNMENT == 0);
                         assert!(loc.length as usize % DIRECT_IO_ALIGNMENT == 0);
@@ -168,12 +163,11 @@ impl PinnedReader {
                         .offset(loc.file_offset as u64)
                         .build();
 
-                        let sender_clone = sender.clone();
                         let uring = Rc::clone(&uring);
-                        let schema = Arc::clone(&self.schema);
                         let batches = Rc::clone(&self.batches);
                         let range = last_offset..loc.batch_blocks_offset;
                         let sender = sender.clone();
+                        let decoder = Rc::clone(&decoder);
                         last_offset = loc.batch_blocks_offset;
                         tokio::task::spawn_local(async move {
                             let cqe = uring.push(read_e).await;
@@ -181,7 +175,7 @@ impl PinnedReader {
                                 panic!("Read returned error {}", cqe.result());
                             }
                             Self::decode_and_send(
-                                schema, batches, range, page, loc, sender,
+                                decoder, batches, range, page, loc, sender,
                             )
                             .await
                             .unwrap();
@@ -189,7 +183,8 @@ impl PinnedReader {
                         });
                     }
 
-                    limiter.acquire_many_owned(self.depth).await;
+                    let _permits = limiter.acquire_many(self.depth * 2).await.unwrap();
+                    limiter.close();
 
                     drop(sender);
                 })

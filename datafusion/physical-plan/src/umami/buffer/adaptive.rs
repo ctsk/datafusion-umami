@@ -110,7 +110,7 @@ impl LazyPartitionBuffer for AdaptiveBuffer {
     type Sink = AdaptiveSink;
     type Source = super::memory::MemorySource;
 
-    fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
+    fn make_sink(&mut self, _schema: SchemaRef) -> Result<Self::Sink> {
         Ok(Self::Sink::new_random(
             self.sink_config.clone(),
             self.key_expr.clone(),

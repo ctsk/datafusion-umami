@@ -4,12 +4,9 @@ use arrow_schema::SchemaRef;
 use datafusion_common::Result;
 use datafusion_execution::{disk_manager::RefCountedTempFile, SendableRecordBatchStream};
 
-use crate::{
-    stream::{ReceiverStreamBuilder, RecordBatchStreamAdapter},
-    umami::{
-        buffer::{empty, LazyPartitionBuffer, LazyPartitionedSource},
-        io::{self, AsyncBatchWriter},
-    },
+use crate::umami::{
+    buffer::{empty, LazyPartitionBuffer, LazyPartitionedSource},
+    io::{self, AsyncBatchWriter},
 };
 
 pub struct IoUringSink {
@@ -31,6 +28,7 @@ impl IoUringSpillBuffer {
 
 impl super::Sink for IoUringSink {
     async fn push(&mut self, batch: arrow::array::RecordBatch) -> Result<()> {
+        let batch = crate::common::compact(1.0, batch);
         self.writer.write(batch, 0).await
     }
 }

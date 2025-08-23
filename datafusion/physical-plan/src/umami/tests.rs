@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
-use arrow::util::pretty::pretty_format_batches;
 use arrow_schema::SchemaRef;
 use datafusion_common::assert_batches_sorted_eq;
 use datafusion_common::record_batch;
@@ -9,8 +8,7 @@ use datafusion_common::Result;
 use datafusion_execution::TaskContext;
 use datafusion_expr::Operator;
 use datafusion_physical_expr::expressions::{binary, col};
-use futures::future::Lazy;
-use futures::StreamExt;
+
 use futures::TryStreamExt;
 
 use crate::common::collect;
@@ -40,7 +38,7 @@ use crate::{
 trait BufferCreator {
     type Buf: LazyPartitionBuffer + Send + 'static;
     fn new(schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf;
-    fn post_sink(buf: &<Self::Buf as LazyPartitionBuffer>::Sink) {}
+    fn post_sink(_buf: &<Self::Buf as LazyPartitionBuffer>::Sink) {}
 }
 
 async fn test_buffer_generic<T: BufferCreator>() -> Result<()> {
@@ -125,7 +123,7 @@ async fn test_buffer_mem() -> Result<()> {
     struct BC {}
     impl BufferCreator for BC {
         type Buf = MemoryBuffer;
-        fn new(schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
+        fn new(_schema: SchemaRef, _ctx: Arc<TaskContext>) -> Self::Buf {
             MemoryBuffer::default()
         }
     }
@@ -156,7 +154,7 @@ async fn test_buffer_mem_partition() -> Result<()> {
     struct BC {}
     impl BufferCreator for BC {
         type Buf = PartitionMemoryBuffer;
-        fn new(schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
+        fn new(schema: SchemaRef, _ctx: Arc<TaskContext>) -> Self::Buf {
             let name = schema.field(0).name();
             let keys: RowExpr = [col(name, &schema).unwrap()].into_iter().collect();
             PartitionMemoryBuffer::new_random(keys, 4)
@@ -170,7 +168,7 @@ async fn test_adaptive_buffer() -> Result<()> {
     struct BC {}
     impl BufferCreator for BC {
         type Buf = AdaptiveBuffer;
-        fn new(schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
+        fn new(schema: SchemaRef, _ctx: Arc<TaskContext>) -> Self::Buf {
             let name = schema.field(0).name();
             let keys: RowExpr = [col(name, &schema).unwrap()].into_iter().collect();
             let config = AdaptiveSinkConfig { partition_start: 1 };
@@ -200,10 +198,7 @@ async fn test_buffer_uring() -> Result<()> {
     struct BC {}
     impl BufferCreator for BC {
         type Buf = IoUringSpillBuffer;
-        fn new(schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
-            let name = schema.field(0).name();
-            let keys: RowExpr = [col(name, &schema).unwrap()].into_iter().collect();
-            let config = AdaptiveSinkConfig { partition_start: 1 };
+        fn new(_schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
             IoUringSpillBuffer::new(
                 ctx.runtime_env()
                     .disk_manager

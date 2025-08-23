@@ -1,4 +1,4 @@
-#![allow(unused)]
+#![allow(dead_code)]
 
 mod buffer;
 mod factory;
@@ -7,9 +7,12 @@ mod io;
 mod tests;
 mod wrapper;
 
+pub use buffer::IoUringSpillBuffer;
+pub use buffer::SpillBuffer;
 pub use factory::BasicStreamProvider;
 pub use factory::StreamFactory;
 pub use factory::StreamProvider;
 use io::spill::InProgressSpillFileWithParts;
-use io::AsyncBatchWriter;
-use io::BatchWriter;
+pub use wrapper::DefaultMaterializeWrapper;
+pub use wrapper::InputKind;
+pub use wrapper::MaterializeWrapper;

@@ -2,7 +2,10 @@ use std::{
     cell::RefCell,
     mem::ManuallyDrop,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 
 pub struct SendablePool {
@@ -60,6 +63,7 @@ impl Drop for SendablePage {
 pub struct LocalPool {
     buffers: RefCell<Vec<memmap2::MmapMut>>,
     alloc_size: usize,
+    alloc_count: AtomicU64,
 }
 
 impl LocalPool {
@@ -67,6 +71,7 @@ impl LocalPool {
         Self {
             buffers: Default::default(),
             alloc_size,
+            alloc_count: AtomicU64::new(0),
         }
     }
     pub fn issue_page(self: &Rc<Self>) -> LocalPage {
@@ -79,6 +84,7 @@ impl LocalPool {
     }
 
     fn allocate_new_page(&self) -> memmap2::MmapMut {
+        self.alloc_count.fetch_add(1, Ordering::AcqRel);
         memmap2::MmapMut::map_anon(self.alloc_size)
             .expect("Failed to allocate spill page")
     }
@@ -87,7 +93,7 @@ impl LocalPool {
 pub struct LocalPage {
     pool: Rc<LocalPool>,
     vec: ManuallyDrop<Vec<u8>>,
-    buffer: memmap2::MmapMut,
+    buffer: Option<memmap2::MmapMut>,
 }
 
 impl LocalPage {
@@ -97,7 +103,7 @@ impl LocalPage {
         Self {
             pool,
             vec: ManuallyDrop::new(vec),
-            buffer,
+            buffer: Some(buffer),
         }
     }
 
@@ -121,7 +127,18 @@ impl LocalPage {
         self.vec.as_mut()
     }
 
-    pub fn return_to_pool(self) {
-        self.pool.buffers.borrow_mut().push(self.buffer);
+    pub fn return_to_pool(&mut self) {
+        self.pool
+            .buffers
+            .borrow_mut()
+            .push(self.buffer.take().unwrap());
+    }
+}
+
+impl Drop for LocalPage {
+    fn drop(&mut self) {
+        if self.buffer.is_some() {
+            self.return_to_pool();
+        }
     }
 }

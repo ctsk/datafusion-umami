@@ -18,7 +18,6 @@ use arrow_schema::{ArrowError, SchemaRef};
 use datafusion_common::{DataFusionError, Result};
 use io_uring::{opcode, types};
 use io_uring_async::IoUringAsync;
-use send_wrapper::SendWrapper;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use crate::umami::io::{
@@ -29,14 +28,14 @@ use crate::umami::io::{
 pub struct Writer {
     path: PathBuf,
     sender: mpsc::Sender<Message>,
-    worker: Option<std::thread::JoinHandle<Result<AlignedPartitionedIPC>>>,
+    worker: Option<tokio::task::JoinHandle<Result<AlignedPartitionedIPC>>>,
 }
 
 impl Writer {
     pub fn new(path: PathBuf, schema: SchemaRef, parts: usize) -> Self {
         let (tx, rx) = mpsc::channel(1);
         let path_ = path.clone();
-        let worker = std::thread::spawn(move || {
+        let worker = tokio::task::spawn_blocking(move || {
             PinnedWriter::new(
                 schema,
                 super::IO_URING_DEPTH,
@@ -59,15 +58,18 @@ impl super::super::AsyncBatchWriter for Writer {
     type Intermediate = AlignedPartitionedIPC;
 
     async fn write(&mut self, batch: RecordBatch, partition: usize) -> Result<()> {
-        self.sender.send(Message::Sink(batch, partition)).await;
+        self.sender
+            .send(Message::Sink(batch, partition))
+            .await
+            .unwrap();
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<Self::Intermediate> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(Message::Finish(tx)).await;
-        rx.await;
-        self.worker.take().unwrap().join().unwrap()
+        self.sender.send(Message::Finish(tx)).await.unwrap();
+        let _ = rx.await;
+        self.worker.take().unwrap().await.unwrap()
     }
 }
 
@@ -88,6 +90,7 @@ enum Message {
 
 use super::DIRECT_IO_ALIGNMENT;
 
+#[allow(dead_code)]
 fn direct_io_pad(value: usize) -> usize {
     ((value + DIRECT_IO_ALIGNMENT - 1) / DIRECT_IO_ALIGNMENT) * DIRECT_IO_ALIGNMENT
 }
@@ -201,7 +204,8 @@ impl PinnedWriter {
         path: PathBuf,
         parts: usize,
     ) -> Self {
-        let mut dict_tracker = DictionaryTracker::new(true);
+        #[allow(deprecated)]
+        let mut dict_tracker = DictionaryTracker::new_with_preserve_dict_id(true, true);
         let data_gen = IpcDataGenerator::default();
         let _ = data_gen.schema_to_bytes_with_dictionary_tracker(
             &schema,
@@ -242,10 +246,10 @@ impl PinnedWriter {
 
         // Create a new current_thread runtime that submits all outstanding submission queue
         // entries as soon as the executor goes idle.
-        let uring_clone = SendWrapper::new(uring.clone());
+        let uring_clone = super::RefSendWrapper::new(uring.clone());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .on_thread_park(move || {
-                uring_clone.submit().unwrap();
+                uring_clone.as_ref().submit().unwrap();
             })
             .enable_all()
             .build()
@@ -257,9 +261,9 @@ impl PinnedWriter {
                     // Spawn a task that waits for the io_uring to become readable and handles completion
                     // queue entries accordingly.
                     tokio::task::spawn_local(IoUringAsync::listen(uring.clone()));
-                    let limiter = Arc::new(Semaphore::new(self.depth));
+                    let limiter = Arc::new(Semaphore::new(self.depth * 2));
                     let mut next_write_offset = 0;
-                    let mut pool = Rc::new(LocalPool::new(super::BATCH_UPPER_BOUND));
+                    let pool = Rc::new(LocalPool::new(super::BATCH_UPPER_BOUND));
                     let mut state_per_p: Vec<_> = (0..self.partitions)
                         .map(|_| {
                             PartWriteState::new(
@@ -279,13 +283,14 @@ impl PinnedWriter {
                         match msg {
                             Message::Sink(record_batch, part) => {
                                 let (dicts, batch) = self.encode_batch(&record_batch)?;
-                                state_per_p[part].push(dicts, batch);
+                                state_per_p[part].push(dicts, batch)?;
 
                                 if state_per_p[part].buffered_size()
                                     >= super::WRITE_LOWER_BOUND
                                 {
-                                    let permit = limiter.clone().acquire_owned();
-                                    let page = state_per_p[part]
+                                    let permit =
+                                        limiter.clone().acquire_owned().await.unwrap();
+                                    let mut page = state_per_p[part]
                                         .take_page_for_write(next_write_offset);
                                     let uring = uring.clone();
                                     let op = opcode::Write::new(
@@ -308,12 +313,17 @@ impl PinnedWriter {
                                 }
                             }
                             Message::Finish(sender) => {
-                                let permits = limiter.acquire_many(self.depth as u32);
+                                let _permits = limiter
+                                    .acquire_many(self.depth as u32 * 2)
+                                    .await
+                                    .unwrap();
+
+                                limiter.close();
 
                                 let mut pbbs = Vec::new();
                                 for mut state in state_per_p {
                                     if state.buffered_size() > 0 {
-                                        let page =
+                                        let mut page =
                                             state.take_page_for_write(next_write_offset);
                                         let uring = uring.clone();
                                         let ptr_as_usize =
@@ -341,7 +351,7 @@ impl PinnedWriter {
                                     pbbs.push((state.offsets, state.written_batches))
                                 }
 
-                                sender.send(());
+                                sender.send(()).unwrap();
 
                                 return Ok(AlignedPartitionedIPC {
                                     schema: self.schema.clone(),
@@ -352,7 +362,12 @@ impl PinnedWriter {
                         }
                     }
 
-                    unreachable!()
+                    return Ok(AlignedPartitionedIPC {
+                        schema: self.schema.clone(),
+                        path: self.path.clone(),
+                        blocks: Vec::new(),
+                    });
+                    // unreachable!()
                 })
                 .await
         })

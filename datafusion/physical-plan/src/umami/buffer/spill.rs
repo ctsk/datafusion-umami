@@ -1,14 +1,13 @@
-use std::{prelude::rust_2024::Future, sync::Arc};
+use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion_common::Result;
 use datafusion_execution::{disk_manager::RefCountedTempFile, SendableRecordBatchStream};
-use futures::Stream;
 
 use crate::{
-    common::collect, spill::in_progress_spill_file::InProgressSpillFile,
-    EmptyRecordBatchStream, SpillManager,
+    spill::in_progress_spill_file::InProgressSpillFile, EmptyRecordBatchStream,
+    SpillManager,
 };
 
 use super::LazyPartitionBuffer;

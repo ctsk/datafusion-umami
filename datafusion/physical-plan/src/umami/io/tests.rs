@@ -1,6 +1,6 @@
 use datafusion_common::{record_batch, Result};
 use futures::StreamExt;
-use tempfile::{tempfile, NamedTempFile, TempPath};
+use tempfile::NamedTempFile;
 
 use crate::{joins::test_utils::compare_batches, umami::io::AsyncBatchWriter};
 
@@ -13,9 +13,9 @@ async fn test_uring_writer() -> Result<()> {
     )?;
 
     let mut writer = super::uring::Writer::new(tmppath.path().into(), data.schema(), 4);
-    writer.write(data.clone(), 2).await;
-    writer.write(data.clone(), 1).await;
-    writer.write(data.clone(), 2).await;
+    writer.write(data.clone(), 2).await?;
+    writer.write(data.clone(), 1).await?;
+    writer.write(data.clone(), 2).await?;
     let oom_data = writer.finish().await?;
 
     eprintln!("{:#?}", oom_data);

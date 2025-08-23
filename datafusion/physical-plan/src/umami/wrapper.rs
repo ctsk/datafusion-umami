@@ -1,11 +1,11 @@
-use std::{marker::PhantomData, mem, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     stream::RecordBatchStreamAdapter,
     umami::{
         buffer::{
-            LazyPartitionBuffer, LazyPartitionedSource, PartitionIdx, PartitionedSource,
-            Sink,
+            self, LazyPartitionBuffer, LazyPartitionedSource, PartitionIdx,
+            PartitionedSource, Sink,
         },
         BasicStreamProvider,
     },
@@ -26,6 +26,8 @@ pub struct MaterializeWrapper<Buffer> {
     ctx: Arc<TaskContext>,
     buffer: Buffer,
 }
+
+pub type DefaultMaterializeWrapper = MaterializeWrapper<buffer::IoUringSpillBuffer>;
 
 pub enum InputKind {
     Unary {
@@ -90,7 +92,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
 
     async fn assemble_and_produce(
         &mut self,
-        mut input: SendableRecordBatchStream,
+        input: SendableRecordBatchStream,
         output: &mut Output,
     ) -> Result<()> {
         let mut inputs = BasicStreamProvider::new([input]);

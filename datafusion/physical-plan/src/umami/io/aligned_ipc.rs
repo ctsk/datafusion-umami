@@ -22,7 +22,7 @@ pub struct Loc {
     pub length: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Block {
     pub meta_length: usize,
     pub data_length: usize,

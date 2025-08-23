@@ -1,11 +1,10 @@
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
-use ahash::{random_state, RandomState};
+use ahash::RandomState;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
-use datafusion_common::{hash_utils::create_hashes, Result};
+use datafusion_common::Result;
 use datafusion_execution::SendableRecordBatchStream;
-use datafusion_physical_expr::PhysicalExprRef;
 
 use crate::{
     memory::MemoryStream,
