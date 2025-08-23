@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        Array, ArrayRef, ArrowPrimitiveType, AsArray, ByteView, GenericByteArray,
-        GenericByteViewArray, NullBufferBuilder, PrimitiveArray,
+        Array, ArrayRef, ArrowPrimitiveType, AsArray, BooleanArray, BooleanBufferBuilder,
+        ByteView, GenericByteArray, GenericByteViewArray, NullBufferBuilder,
+        PrimitiveArray,
     },
     buffer::{NullBuffer, OffsetBuffer, ScalarBuffer},
     datatypes::{ArrowNativeType, ByteArrayType, ByteViewType, DataType},
@@ -24,6 +25,7 @@ pub fn scatter(
         arr => {
             scatter_primitive::<_, false>(indices, hist, &to(arr, array))
         }
+        DataType::Boolean => scatter_boolean(indices, hist, &to(arr.as_boolean(), array)),
         DataType::Utf8View => scatter_view(indices, hist, &to(arr.as_string_view(), array)),
         DataType::BinaryView => scatter_view(indices, hist, &to(arr.as_binary_view(), array)),
         DataType::Utf8 => scatter_bytes(indices, hist, &to(arr.as_string::<i32>(), array)),
@@ -31,7 +33,7 @@ pub fn scatter(
         DataType::Binary => scatter_bytes(indices, hist, &to(arr.as_binary::<i32>(), array)),
         DataType::LargeBinary => scatter_bytes(indices, hist, &to(arr.as_binary::<i64>(), array)),
         _ => {
-            todo!()
+            todo!("Scattering {:?} is not yet supported", arr.data_type())
         }
     )
 }
@@ -265,4 +267,33 @@ fn scatter_nulls(
             }
         }
     }
+}
+
+fn scatter_boolean(
+    indices: &[Vec<u64>],
+    hist: &[usize],
+    arrays: &[&BooleanArray],
+) -> Vec<ArrayRef> {
+    let mut out: Vec<_> = hist.iter().map(|l| BooleanBufferBuilder::new(*l)).collect();
+
+    for (indices, array) in indices.into_iter().zip(arrays.into_iter()) {
+        let values = array.values();
+        for (i, dst) in indices.iter().enumerate() {
+            out[*dst as usize].append(values.value(i));
+        }
+    }
+
+    let nulls = if needs_scatter_nulls(arrays) {
+        scatter_nulls_arr(indices, hist, arrays)
+    } else {
+        vec![None; hist.len()]
+    };
+
+    out.into_iter()
+        .zip(nulls)
+        .map(|(mut out, nulls)| {
+            let values = out.finish();
+            Arc::new(BooleanArray::new(values, nulls)) as _
+        })
+        .collect()
 }
