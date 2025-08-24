@@ -23,7 +23,7 @@ impl super::Sink for SpillSink {
     }
 }
 
-struct AsyncSpillBuffer {
+pub struct AsyncSpillBuffer {
     manager: Arc<SpillManager>,
 }
 

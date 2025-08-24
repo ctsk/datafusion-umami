@@ -182,6 +182,20 @@ impl<S: squeue::Entry, C: cqueue::Entry> IoUringAsync<S, C> {
     pub fn submit(&self) -> std::io::Result<usize> {
         self.uring.submit()
     }
+
+    /// Submit all queued submission queue events to the kernel.
+    pub fn submit_and_wait(&self, wait: usize) -> std::io::Result<usize> {
+        self.uring.submit_and_wait(wait)
+    }
+
+    /// Submit all queued submission queue events to the kernel.
+    pub fn submit_and_wait_all(&self) -> std::io::Result<usize> {
+        unsafe {
+            self.uring.submission_shared().sync();
+            self.uring
+                .submit_and_wait(self.uring.submission_shared().len())
+        }
+    }
 }
 
 #[cfg(test)]

@@ -27,12 +27,12 @@ use crate::aggregates::{
     topk_stream::GroupedTopKAggregateStream,
 };
 use crate::execution_plan::{CardinalityEffect, EmissionType};
-use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use crate::umami::{InputKind, IoUringSpillBuffer, MaterializeWrapper};
+use crate::metrics::{ExecutionPlanMetricsSet, MetricsSet, SpillMetrics};
+use crate::umami::{AsyncSpillBuffer, InputKind, IoUringSpillBuffer, MaterializeWrapper};
 use crate::windows::get_ordered_partition_by_indices;
 use crate::{
     DisplayFormatType, Distribution, ExecutionPlan, InputOrderMode,
-    SendableRecordBatchStream, Statistics,
+    SendableRecordBatchStream, SpillManager, Statistics,
 };
 
 use arrow::array::{ArrayRef, UInt16Array, UInt32Array, UInt64Array, UInt8Array};
@@ -651,6 +651,11 @@ impl AggregateExec {
             .disk_manager
             .create_tmp_file(IoUringSpillBuffer::NAME)?;
         let buffer = IoUringSpillBuffer::new(file);
+        // let buffer = AsyncSpillBuffer::new(SpillManager::new(
+        //     context.runtime_env(),
+        //     SpillMetrics::new(&self.metrics, partition),
+        //     Arc::clone(&self.input().schema()),
+        // ));
         let wrapped =
             MaterializeWrapper::new(Box::new(factory), input, partition, context, buffer);
 

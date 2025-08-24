@@ -7,6 +7,7 @@ mod io;
 mod tests;
 mod wrapper;
 
+pub use buffer::AsyncSpillBuffer;
 pub use buffer::IoUringSpillBuffer;
 pub use buffer::SpillBuffer;
 pub use factory::BasicStreamProvider;

@@ -1,10 +1,10 @@
 mod reader;
 mod writer;
 
-const IO_URING_DEPTH: usize = 1;
+const IO_URING_DEPTH: usize = 4;
 const DIRECT_IO_ALIGNMENT: usize = 512;
 const BATCH_UPPER_BOUND: usize = 1 << 30;
-const WRITE_LOWER_BOUND: usize = 1 << 20;
+const WRITE_LOWER_BOUND: usize = 1 << 16;
 
 use std::rc::Rc;
 

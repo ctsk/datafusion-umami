@@ -15,6 +15,7 @@ mod uring_spill;
 
 pub use adaptive::AdaptiveBuffer;
 pub use adaptive::AdaptiveSinkConfig;
+pub use async_spill::AsyncSpillBuffer;
 pub use memory::MemoryBuffer;
 pub use memory::PartitionMemoryBuffer;
 pub use spill::SpillBuffer;
