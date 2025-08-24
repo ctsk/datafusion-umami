@@ -40,6 +40,7 @@ use crate::projection::{
     ProjectionExec,
 };
 use crate::spill::get_record_batch_memory_size;
+use crate::umami::{InputKind, StreamFactory};
 use crate::ExecutionPlanProperties;
 use crate::{
     common::can_project,
@@ -634,6 +635,98 @@ impl HashJoinExec {
             reorder_output_after_swap(Arc::new(new_join), &left.schema(), &right.schema())
         }
     }
+
+    pub fn execute_direct(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        let on_left = self
+            .on
+            .iter()
+            .map(|on| Arc::clone(&on.0))
+            .collect::<Vec<_>>();
+        let on_right = self
+            .on
+            .iter()
+            .map(|on| Arc::clone(&on.1))
+            .collect::<Vec<_>>();
+
+        let join_metrics = BuildProbeJoinMetrics::new(partition, &self.metrics);
+        let left_fut = match self.mode {
+            PartitionMode::CollectLeft => self.left_fut.try_once(|| {
+                let left_stream = self.left.execute(0, Arc::clone(&context))?;
+
+                let reservation =
+                    MemoryConsumer::new("HashJoinInput").register(context.memory_pool());
+
+                Ok(collect_left_input(
+                    self.random_state.clone(),
+                    left_stream,
+                    on_left.clone(),
+                    join_metrics.clone(),
+                    reservation,
+                    need_produce_result_in_final(self.join_type),
+                    self.right().output_partitioning().partition_count(),
+                ))
+            })?,
+            PartitionMode::Partitioned => {
+                let left_stream = self.left.execute(partition, Arc::clone(&context))?;
+
+                let reservation =
+                    MemoryConsumer::new(format!("HashJoinInput[{partition}]"))
+                        .register(context.memory_pool());
+
+                OnceFut::new(collect_left_input(
+                    self.random_state.clone(),
+                    left_stream,
+                    on_left.clone(),
+                    join_metrics.clone(),
+                    reservation,
+                    need_produce_result_in_final(self.join_type),
+                    1,
+                ))
+            }
+            PartitionMode::Auto => {
+                return plan_err!(
+                    "Invalid HashJoinExec, unsupported PartitionMode {:?} in execute()",
+                    PartitionMode::Auto
+                );
+            }
+        };
+
+        let batch_size = context.session_config().batch_size();
+
+        // we have the batches and the hash map with their keys. We can how create a stream
+        // over the right that uses this information to issue new batches.
+        let right_stream = self.right.execute(partition, context)?;
+
+        // update column indices to reflect the projection
+        let column_indices_after_projection = match &self.projection {
+            Some(projection) => projection
+                .iter()
+                .map(|i| self.column_indices[*i].clone())
+                .collect(),
+            None => self.column_indices.clone(),
+        };
+
+        Ok(Box::pin(HashJoinStream {
+            schema: self.schema(),
+            on_right,
+            filter: self.filter.clone(),
+            join_type: self.join_type,
+            right: right_stream,
+            column_indices: column_indices_after_projection,
+            random_state: self.random_state.clone(),
+            join_metrics,
+            null_equality: self.null_equality,
+            state: HashJoinStreamState::WaitBuildSide,
+            build_side: BuildSide::Initial(BuildSideInitialState { left_fut }),
+            batch_size,
+            hashes_buffer: vec![],
+            right_side_ordered: self.right.output_ordering().is_some(),
+        }))
+    }
 }
 
 impl DisplayAs for HashJoinExec {
@@ -770,11 +863,13 @@ impl ExecutionPlan for HashJoinExec {
         )?))
     }
 
-    fn execute(
+    fn execute_factory(
         &self,
         partition: usize,
         context: Arc<TaskContext>,
-    ) -> Result<SendableRecordBatchStream> {
+    ) -> Result<Box<dyn StreamFactory + Send>> {
+        let batch_size = context.session_config().batch_size();
+
         let on_left = self
             .on
             .iter()
@@ -785,6 +880,38 @@ impl ExecutionPlan for HashJoinExec {
             .iter()
             .map(|on| Arc::clone(&on.1))
             .collect::<Vec<_>>();
+
+        // update column indices to reflect the projection
+        let column_indices_after_projection = match &self.projection {
+            Some(projection) => projection
+                .iter()
+                .map(|i| self.column_indices[*i].clone())
+                .collect(),
+            None => self.column_indices.clone(),
+        };
+
+        let join_metrics = BuildProbeJoinMetrics::new(partition, &self.metrics);
+
+        Ok(Box::new(HashJoinStreamFactory {
+            schema: self.schema(),
+            on_right,
+            on_left,
+            filter: self.filter.clone(),
+            join_type: self.join_type,
+            column_indices: column_indices_after_projection,
+            random_state: self.random_state.clone(),
+            join_metrics,
+            null_equality: self.null_equality,
+            batch_size,
+            right_side_ordered: self.right.output_ordering().is_some(),
+        }))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
         let left_partitions = self.left.output_partitioning().partition_count();
         let right_partitions = self.right.output_partitioning().partition_count();
 
@@ -803,80 +930,39 @@ impl ExecutionPlan for HashJoinExec {
             );
         }
 
-        let join_metrics = BuildProbeJoinMetrics::new(partition, &self.metrics);
-        let left_fut = match self.mode {
-            PartitionMode::CollectLeft => self.left_fut.try_once(|| {
-                let left_stream = self.left.execute(0, Arc::clone(&context))?;
+        if self.mode == PartitionMode::Auto {
+            return plan_err!(
+                "Invalid HashJoinExec, unsupported PartitionMode {:?} in execute()",
+                PartitionMode::Auto
+            );
+        }
 
-                let reservation =
-                    MemoryConsumer::new("HashJoinInput").register(context.memory_pool());
-
-                Ok(collect_left_input(
-                    self.random_state.clone(),
-                    left_stream,
-                    on_left.clone(),
-                    join_metrics.clone(),
-                    reservation,
-                    need_produce_result_in_final(self.join_type),
-                    self.right().output_partitioning().partition_count(),
-                ))
-            })?,
-            PartitionMode::Partitioned => {
-                let left_stream = self.left.execute(partition, Arc::clone(&context))?;
-
-                let reservation =
-                    MemoryConsumer::new(format!("HashJoinInput[{partition}]"))
-                        .register(context.memory_pool());
-
-                OnceFut::new(collect_left_input(
-                    self.random_state.clone(),
-                    left_stream,
-                    on_left.clone(),
-                    join_metrics.clone(),
-                    reservation,
-                    need_produce_result_in_final(self.join_type),
-                    1,
-                ))
-            }
-            PartitionMode::Auto => {
-                return plan_err!(
-                    "Invalid HashJoinExec, unsupported PartitionMode {:?} in execute()",
-                    PartitionMode::Auto
-                );
-            }
-        };
-
-        let batch_size = context.session_config().batch_size();
-
-        // we have the batches and the hash map with their keys. We can how create a stream
-        // over the right that uses this information to issue new batches.
-        let right_stream = self.right.execute(partition, context)?;
-
-        // update column indices to reflect the projection
-        let column_indices_after_projection = match &self.projection {
-            Some(projection) => projection
+        if self.mode == PartitionMode::CollectLeft {
+            self.execute_direct(partition, context)
+        } else {
+            let factory = self.execute_factory(partition, Arc::clone(&context))?;
+            let left = self.left.execute(partition, Arc::clone(&context))?;
+            let right = self.right.execute(partition, Arc::clone(&context))?;
+            let on_left = self
+                .on
                 .iter()
-                .map(|i| self.column_indices[*i].clone())
-                .collect(),
-            None => self.column_indices.clone(),
-        };
+                .map(|on| Arc::clone(&on.0))
+                .collect::<Vec<_>>();
+            let on_right = self
+                .on
+                .iter()
+                .map(|on| Arc::clone(&on.1))
+                .collect::<Vec<_>>();
 
-        Ok(Box::pin(HashJoinStream {
-            schema: self.schema(),
-            on_right,
-            filter: self.filter.clone(),
-            join_type: self.join_type,
-            right: right_stream,
-            column_indices: column_indices_after_projection,
-            random_state: self.random_state.clone(),
-            join_metrics,
-            null_equality: self.null_equality,
-            state: HashJoinStreamState::WaitBuildSide,
-            build_side: BuildSide::Initial(BuildSideInitialState { left_fut }),
-            batch_size,
-            hashes_buffer: vec![],
-            right_side_ordered: self.right.output_ordering().is_some(),
-        }))
+            let wrapped = crate::umami::apply(
+                factory,
+                InputKind::binary(left, on_left, right, on_right),
+                partition,
+                context,
+            )?;
+
+            Ok(wrapped)
+        }
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
@@ -944,6 +1030,66 @@ impl ExecutionPlan for HashJoinExec {
         } else {
             try_embed_projection(projection, self)
         }
+    }
+}
+
+struct HashJoinStreamFactory {
+    schema: SchemaRef,
+    on_right: Vec<PhysicalExprRef>,
+    on_left: Vec<PhysicalExprRef>,
+    filter: Option<JoinFilter>,
+    join_type: JoinType,
+    random_state: RandomState,
+    join_metrics: BuildProbeJoinMetrics,
+    column_indices: Vec<ColumnIndex>,
+    null_equality: NullEquality,
+    batch_size: usize,
+    right_side_ordered: bool,
+}
+
+impl StreamFactory for HashJoinStreamFactory {
+    fn make(
+        &mut self,
+        inputs: &mut dyn crate::umami::StreamProvider,
+        partition: usize,
+        context: &TaskContext,
+    ) -> Result<SendableRecordBatchStream> {
+        let left_stream = inputs.get(0);
+        let right_stream = inputs.get(1);
+
+        let reservation = MemoryConsumer::new(format!("HashJoinInput[{partition}]"))
+            .register(context.memory_pool());
+
+        let left_fut = OnceFut::new(collect_left_input(
+            self.random_state.clone(),
+            left_stream,
+            self.on_left.clone(),
+            self.join_metrics.clone(),
+            reservation,
+            need_produce_result_in_final(self.join_type),
+            1,
+        ));
+
+        Ok(Box::pin(HashJoinStream {
+            schema: Arc::clone(&self.schema),
+            on_right: self.on_right.clone(),
+            filter: self.filter.clone(),
+            join_type: self.join_type.clone(),
+            right: right_stream,
+            random_state: self.random_state.clone(),
+            join_metrics: self.join_metrics.clone(),
+            column_indices: self.column_indices.clone(),
+            null_equality: self.null_equality.clone(),
+            state: HashJoinStreamState::WaitBuildSide,
+            build_side: BuildSide::Initial(BuildSideInitialState { left_fut }),
+            batch_size: self.batch_size,
+            hashes_buffer: vec![],
+            right_side_ordered: self.right_side_ordered,
+        }))
+    }
+
+    fn output_schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
     }
 }
 

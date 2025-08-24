@@ -3,11 +3,14 @@ use std::sync::Arc;
 use arrow::array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion_common::Result;
-use datafusion_execution::{disk_manager::RefCountedTempFile, SendableRecordBatchStream};
+use datafusion_execution::{
+    disk_manager::RefCountedTempFile, runtime_env::RuntimeEnv, SendableRecordBatchStream,
+};
 
 use crate::{
-    spill::in_progress_spill_file::InProgressSpillFile, EmptyRecordBatchStream,
-    SpillManager,
+    metrics::{ExecutionPlanMetricsSet, SpillMetrics},
+    spill::in_progress_spill_file::InProgressSpillFile,
+    EmptyRecordBatchStream, SpillManager,
 };
 
 use super::LazyPartitionBuffer;
@@ -15,14 +18,13 @@ use super::LazyPartitionBuffer;
 const NAME: &str = "UMAMI_SPILL";
 
 pub struct SpillBuffer {
-    manager: Arc<SpillManager>,
+    runtime: Arc<RuntimeEnv>,
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl SpillBuffer {
-    pub fn new(manager: SpillManager) -> Self {
-        Self {
-            manager: Arc::new(manager),
-        }
+    pub fn new(runtime: Arc<RuntimeEnv>, metrics: ExecutionPlanMetricsSet) -> Self {
+        Self { runtime, metrics }
     }
 }
 
@@ -31,13 +33,22 @@ impl LazyPartitionBuffer for SpillBuffer {
     type Source = SpillSource;
 
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
-        let writer = self.manager.create_in_progress_file(NAME)?;
-        Ok(Self::Sink { schema, writer })
+        let manager = SpillManager::new(
+            Arc::clone(&self.runtime),
+            SpillMetrics::new(&self.metrics, 0),
+            Arc::clone(&schema),
+        );
+        let writer = manager.create_in_progress_file(NAME)?;
+        Ok(Self::Sink {
+            schema,
+            manager: Arc::new(manager),
+            writer,
+        })
     }
 
     async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
         let schema = sink.schema;
-        let manager = Arc::clone(&self.manager);
+        let manager = Arc::clone(&sink.manager);
         let spill_file = sink.writer.finish()?;
         Ok(Self::Source {
             schema,
@@ -53,6 +64,7 @@ impl LazyPartitionBuffer for SpillBuffer {
 
 pub struct SpillSink {
     schema: SchemaRef,
+    manager: Arc<SpillManager>,
     writer: InProgressSpillFile,
 }
 

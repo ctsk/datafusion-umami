@@ -14,7 +14,6 @@ use futures::TryStreamExt;
 use crate::common::collect;
 use crate::joins::test_utils::compare_batches;
 use crate::metrics::ExecutionPlanMetricsSet;
-use crate::metrics::SpillMetrics;
 use crate::umami::buffer::AdaptiveBuffer;
 use crate::umami::buffer::AdaptiveSinkConfig;
 use crate::umami::buffer::IoUringSpillBuffer;
@@ -27,7 +26,6 @@ use crate::umami::buffer::Sink;
 use crate::umami::buffer::SpillBuffer;
 use crate::umami::wrapper::InputKind;
 use crate::utils::RowExpr;
-use crate::SpillManager;
 use crate::{
     projection::ProjectionExec,
     test::TestMemoryExec,
@@ -135,15 +133,9 @@ async fn test_buffer_spill() -> Result<()> {
     struct BC {}
     impl BufferCreator for BC {
         type Buf = SpillBuffer;
-        fn new(schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
+        fn new(_schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
             let dummy_metrics = ExecutionPlanMetricsSet::new();
-            let manager = SpillManager::new(
-                ctx.runtime_env(),
-                SpillMetrics::new(&dummy_metrics, 0),
-                schema,
-            );
-
-            SpillBuffer::new(manager)
+            SpillBuffer::new(ctx.runtime_env(), dummy_metrics)
         }
     }
     test_buffer_generic::<BC>().await
@@ -199,12 +191,7 @@ async fn test_buffer_uring() -> Result<()> {
     impl BufferCreator for BC {
         type Buf = IoUringSpillBuffer;
         fn new(_schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
-            IoUringSpillBuffer::new(
-                ctx.runtime_env()
-                    .disk_manager
-                    .create_tmp_file(IoUringSpillBuffer::NAME)
-                    .unwrap(),
-            )
+            IoUringSpillBuffer::new(ctx.runtime_env())
         }
     }
     test_buffer_generic::<BC>().await?;

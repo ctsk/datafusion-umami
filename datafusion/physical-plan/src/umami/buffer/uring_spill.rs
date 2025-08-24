@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
 use datafusion_common::Result;
-use datafusion_execution::{disk_manager::RefCountedTempFile, SendableRecordBatchStream};
+use datafusion_execution::{
+    disk_manager::RefCountedTempFile, runtime_env::RuntimeEnv, SendableRecordBatchStream,
+};
 
 use crate::umami::{
     buffer::{empty, LazyPartitionBuffer, LazyPartitionedSource},
@@ -10,19 +12,20 @@ use crate::umami::{
 };
 
 pub struct IoUringSink {
+    file: RefCountedTempFile,
     schema: SchemaRef,
     writer: io::uring::Writer,
 }
 
 pub struct IoUringSpillBuffer {
-    file: RefCountedTempFile,
+    runtime: Arc<RuntimeEnv>,
 }
 
 impl IoUringSpillBuffer {
     pub const NAME: &str = "UMAMI_URING_SPILL";
 
-    pub fn new(file: RefCountedTempFile) -> Self {
-        Self { file }
+    pub fn new(runtime: Arc<RuntimeEnv>) -> Self {
+        Self { runtime }
     }
 }
 
@@ -34,6 +37,7 @@ impl super::Sink for IoUringSink {
 }
 
 pub struct IoUringSource {
+    file: RefCountedTempFile,
     schema: SchemaRef,
     reader: io::uring::Reader,
 }
@@ -55,15 +59,21 @@ impl LazyPartitionBuffer for IoUringSpillBuffer {
     type Source = IoUringSource;
 
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
+        let file = self.runtime.disk_manager.create_tmp_file(Self::NAME)?;
         let writer =
-            io::uring::Writer::new(self.file.path().to_owned(), Arc::clone(&schema), 1);
-        Ok(Self::Sink { schema, writer })
+            io::uring::Writer::new(file.path().to_owned(), Arc::clone(&schema), 1);
+        Ok(Self::Sink {
+            file,
+            schema,
+            writer,
+        })
     }
 
     async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
         let data = sink.writer.finish().await?;
         let reader = io::uring::Reader::new(data);
         let source = IoUringSource {
+            file: sink.file,
             schema: sink.schema,
             reader,
         };
