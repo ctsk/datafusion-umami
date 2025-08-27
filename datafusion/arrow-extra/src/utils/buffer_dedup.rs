@@ -44,14 +44,6 @@ impl BufferDedup {
         }
     }
 
-    pub fn add_buffer(&mut self, buffer: &Buffer) -> u32 {
-        add_buffer(&mut self.inner, buffer)
-    }
-
-    pub fn buffer_count(&self) -> usize {
-        self.inner.buffers.len()
-    }
-
     pub fn finish(&mut self) -> Vec<Buffer> {
         self.inner.buffers_map.clear();
         std::mem::take(&mut self.inner.buffers)

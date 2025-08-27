@@ -85,13 +85,6 @@ fn concat_reduce_views_impl<V: ByteViewType>(arrays: &[&dyn Array]) -> ArrayRef 
             continue;
         }
 
-        if dedup.buffer_count() == 0 {
-            for buffer in array.data_buffers() {
-                dedup.add_buffer(buffer);
-            }
-            continue;
-        }
-
         let adjust_range = views.len() - array.len()..views.len();
         let new_nulls = array.nulls().filter(|n| n.null_count() > 0);
         dedup.adjust(&mut views[adjust_range], new_nulls, array.data_buffers());
