@@ -23,7 +23,7 @@ async fn test_uring_writer() -> Result<()> {
     let mut reader = super::uring::Reader::new(oom_data);
     let mut read_batches = vec![];
     for part in 0..4 {
-        let mut stream = reader.launch(part);
+        let mut stream = reader.launch(part, true);
         while let Some(batch) = stream.next().await {
             read_batches.push(batch?);
         }

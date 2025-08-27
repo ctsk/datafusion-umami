@@ -23,18 +23,15 @@ pub use wrapper::DefaultMaterializeWrapper;
 pub use wrapper::InputKind;
 pub use wrapper::MaterializeWrapper;
 
-use crate::metrics::ExecutionPlanMetricsSet;
-use crate::metrics::SpillMetrics;
-use crate::SpillManager;
-
 pub fn apply(
     factory: Box<dyn StreamFactory + Send>,
     input: InputKind,
     partition: usize,
     context: Arc<TaskContext>,
 ) -> Result<SendableRecordBatchStream> {
-    // let metrics = ExecutionPlanMetricsSet::new();
-    // let buffer = SpillBuffer::new(context.runtime_env(), metrics);
-    let buffer = IoUringSpillBuffer::new(context.runtime_env());
+    let buffer = IoUringSpillBuffer::new(
+        context.runtime_env(),
+        context.session_config().options().x.recycle,
+    );
     Ok(MaterializeWrapper::new(factory, input, partition, context, buffer).stream())
 }

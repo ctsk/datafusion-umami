@@ -19,13 +19,14 @@ pub struct IoUringSink {
 
 pub struct IoUringSpillBuffer {
     runtime: Arc<RuntimeEnv>,
+    recycle: bool,
 }
 
 impl IoUringSpillBuffer {
     pub const NAME: &str = "UMAMI_URING_SPILL";
 
-    pub fn new(runtime: Arc<RuntimeEnv>) -> Self {
-        Self { runtime }
+    pub fn new(runtime: Arc<RuntimeEnv>, recycle: bool) -> Self {
+        Self { runtime, recycle }
     }
 }
 
@@ -40,13 +41,14 @@ pub struct IoUringSource {
     file: RefCountedTempFile,
     schema: SchemaRef,
     reader: io::uring::Reader,
+    recycle: bool,
 }
 
 impl LazyPartitionedSource for IoUringSource {
     type PartitionedSource = empty::EmptySource;
 
     async fn unpartitioned(&mut self) -> Result<SendableRecordBatchStream> {
-        Ok(self.reader.launch(0))
+        Ok(self.reader.launch(0, self.recycle))
     }
 
     fn into_partitioned(self) -> Self::PartitionedSource {
@@ -76,6 +78,7 @@ impl LazyPartitionBuffer for IoUringSpillBuffer {
             file: sink.file,
             schema: sink.schema,
             reader,
+            recycle: self.recycle,
         };
         Ok(source)
     }

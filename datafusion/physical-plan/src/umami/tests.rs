@@ -191,7 +191,7 @@ async fn test_buffer_uring() -> Result<()> {
     impl BufferCreator for BC {
         type Buf = IoUringSpillBuffer;
         fn new(_schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
-            IoUringSpillBuffer::new(ctx.runtime_env())
+            IoUringSpillBuffer::new(ctx.runtime_env(), true)
         }
     }
     test_buffer_generic::<BC>().await?;

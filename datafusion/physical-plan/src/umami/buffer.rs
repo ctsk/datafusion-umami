@@ -13,10 +13,14 @@ mod memory;
 mod spill;
 mod uring_spill;
 
+#[allow(unused_imports)]
 pub use adaptive::AdaptiveBuffer;
+#[allow(unused_imports)]
 pub use adaptive::AdaptiveSinkConfig;
 pub use async_spill::AsyncSpillBuffer;
+#[allow(unused_imports)]
 pub use memory::MemoryBuffer;
+#[allow(unused_imports)]
 pub use memory::PartitionMemoryBuffer;
 pub use spill::SpillBuffer;
 pub use uring_spill::IoUringSpillBuffer;

@@ -894,6 +894,14 @@ config_namespace! {
     }
 }
 
+config_namespace! {
+    /// Experimental options
+    pub struct ExperimentalOptions {
+        /// Should the io_uring OOM reader try to recycle pages?
+        pub recycle: bool, default = false
+    }
+}
+
 impl<'a> TryInto<arrow::util::display::FormatOptions<'a>> for &'a FormatOptions {
     type Error = DataFusionError;
     fn try_into(self) -> Result<arrow::util::display::FormatOptions<'a>> {
@@ -952,6 +960,8 @@ pub struct ConfigOptions {
     pub extensions: Extensions,
     /// Formatting options when printing batches
     pub format: FormatOptions,
+    /// Experimental options
+    pub x: ExperimentalOptions,
 }
 
 impl ConfigField for ConfigOptions {
@@ -965,6 +975,7 @@ impl ConfigField for ConfigOptions {
             "explain" => self.explain.set(rem, value),
             "sql_parser" => self.sql_parser.set(rem, value),
             "format" => self.format.set(rem, value),
+            "x" => self.x.set(rem, value),
             _ => _config_err!("Config value \"{key}\" not found on ConfigOptions"),
         }
     }
@@ -976,6 +987,7 @@ impl ConfigField for ConfigOptions {
         self.explain.visit(v, "datafusion.explain", "");
         self.sql_parser.visit(v, "datafusion.sql_parser", "");
         self.format.visit(v, "datafusion.format", "");
+        self.x.visit(v, "datafusion.x", "");
     }
 }
 
