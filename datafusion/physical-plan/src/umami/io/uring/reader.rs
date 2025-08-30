@@ -1,4 +1,12 @@
-use std::{cell::RefCell, ops::Range, os::fd::AsRawFd, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    fs,
+    ops::Range,
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+};
 
 use arrow::{
     array::RecordBatch,
@@ -35,7 +43,12 @@ impl Reader {
         }
     }
 
-    pub fn launch(&mut self, part: usize, recycle: bool) -> SendableRecordBatchStream {
+    pub fn launch(
+        &mut self,
+        part: usize,
+        recycle: bool,
+        direct_io: bool,
+    ) -> SendableRecordBatchStream {
         let (locs, bbss) = self.blocks_per_p[part]
             .take()
             .expect("Whoa! Partition was read multiple times");
@@ -56,7 +69,8 @@ impl Reader {
                     offsets: locs,
                     batches: Rc::new(bbss),
                     depth: super::IO_URING_DEPTH as u32,
-                    pool: Arc::new(SendablePool::new(super::BATCH_UPPER_BOUND)),
+                    direct_io,
+                    pool: Arc::new(SendablePool::new()),
                 }
                 .launch(sender)
             } else {
@@ -66,6 +80,7 @@ impl Reader {
                     offsets: locs,
                     batches: Rc::new(bbss),
                     depth: super::IO_URING_DEPTH as u32,
+                    direct_io,
                     pool: AllocPool::default(),
                 }
                 .launch(sender)
@@ -82,6 +97,7 @@ struct PinnedReader<Pool> {
     batches: Rc<Vec<BatchBlocks>>,
     path: PathBuf,
     depth: u32,
+    direct_io: bool,
     pool: Pool,
 }
 
@@ -128,10 +144,12 @@ impl<Page: pool::Page, Pool: pool::Pool<Page = Page>> PinnedReader<Pool> {
     pub fn launch(self, sender: mpsc::Sender<Result<RecordBatch>>) -> Result<()> {
         let uring = IoUringAsync::new(self.depth).unwrap();
         let uring = Rc::new(uring);
-        let file = std::fs::OpenOptions::new()
-            .create(false)
-            .read(true)
-            .open(&self.path)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.create(false).read(true);
+        if self.direct_io {
+            opts.custom_flags(libc::O_DIRECT);
+        }
+        let file = opts.open(&self.path)?;
 
         // Create a new current_thread runtime that submits all outstanding submission queue
         // entries as soon as the executor goes idle.
@@ -157,11 +175,14 @@ impl<Page: pool::Page, Pool: pool::Pool<Page = Page>> PinnedReader<Pool> {
                     let mut last_offset = 0;
                     for loc in self.offsets {
                         let permit = Arc::clone(&limiter).acquire_owned().await.unwrap();
-                        let mut page = self.pool.issue_page(super::BATCH_UPPER_BOUND);
+                        let mut page =
+                            self.pool.issue_page(loc.length, super::BATCH_UPPER_BOUND);
                         let ptr = page.as_ptr().as_ptr();
-                        assert!(ptr as usize % DIRECT_IO_ALIGNMENT == 0);
-                        assert!(loc.length as usize % DIRECT_IO_ALIGNMENT == 0);
-                        assert!(loc.file_offset as usize % DIRECT_IO_ALIGNMENT == 0);
+                        if self.direct_io {
+                            assert!(ptr as usize % DIRECT_IO_ALIGNMENT == 0);
+                            assert!(loc.length as usize % DIRECT_IO_ALIGNMENT == 0);
+                            assert!(loc.file_offset as usize % DIRECT_IO_ALIGNMENT == 0);
+                        }
                         let read_e = opcode::Read::new(
                             types::Fd(file.as_raw_fd()),
                             ptr,

@@ -8,6 +8,7 @@ use crate::umami::buffer::LazyPartitionBuffer;
 use crate::umami::io::pinned_writer::make_pinned;
 use crate::umami::io::pinned_writer::PinnedHandle;
 use crate::umami::{io::AsyncBatchWriter, InProgressSpillFileWithParts};
+use crate::utils::RowExpr;
 use crate::SpillManager;
 
 const NAME: &str = "UMAMI_ASYNC_SPILL";
@@ -39,7 +40,7 @@ impl LazyPartitionBuffer for AsyncSpillBuffer {
     type Sink = SpillSink;
     type Source = super::spill::SpillSource;
 
-    fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
+    fn make_sink(&mut self, schema: SchemaRef, _key: RowExpr) -> Result<Self::Sink> {
         let ipsf = self.manager.create_in_progress_file(NAME)?;
         let ipsfwp = InProgressSpillFileWithParts::new(ipsf);
         let writer = make_pinned(|| ipsfwp);

@@ -12,7 +12,7 @@ pub use sendable::SendablePool;
 pub trait Pool {
     type Page: Page;
 
-    fn issue_page(&self, size: usize) -> Self::Page;
+    fn issue_page(&self, target: usize, upper_bound: usize) -> Self::Page;
 }
 
 pub trait Page {

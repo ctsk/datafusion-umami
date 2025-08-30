@@ -7,7 +7,7 @@ use datafusion_execution::{
 };
 
 use crate::umami::{
-    buffer::{empty, LazyPartitionBuffer, LazyPartitionedSource},
+    buffer::{PartitionBuffer, PartitionedSource},
     io::{self, AsyncBatchWriter},
 };
 
@@ -20,20 +20,36 @@ pub struct IoUringSink {
 pub struct IoUringSpillBuffer {
     runtime: Arc<RuntimeEnv>,
     recycle: bool,
+    direct_io: bool,
+    partition_count: usize,
 }
 
 impl IoUringSpillBuffer {
     pub const NAME: &str = "UMAMI_URING_SPILL";
 
-    pub fn new(runtime: Arc<RuntimeEnv>, recycle: bool) -> Self {
-        Self { runtime, recycle }
+    pub fn new(
+        runtime: Arc<RuntimeEnv>,
+        recycle: bool,
+        direct_io: bool,
+        partition_count: usize,
+    ) -> Self {
+        Self {
+            runtime,
+            recycle,
+            direct_io,
+            partition_count,
+        }
     }
 }
 
-impl super::Sink for IoUringSink {
-    async fn push(&mut self, batch: arrow::array::RecordBatch) -> Result<()> {
+impl super::PartitionedSink for IoUringSink {
+    async fn push_to_part(
+        &mut self,
+        batch: arrow::array::RecordBatch,
+        part: usize,
+    ) -> Result<()> {
         let batch = crate::common::compact(1.0, batch);
-        self.writer.write(batch, 0).await
+        self.writer.write(batch, part).await
     }
 }
 
@@ -42,28 +58,38 @@ pub struct IoUringSource {
     schema: SchemaRef,
     reader: io::uring::Reader,
     recycle: bool,
+    direct_io: bool,
+    partition_count: usize,
 }
 
-impl LazyPartitionedSource for IoUringSource {
-    type PartitionedSource = empty::EmptySource;
-
-    async fn unpartitioned(&mut self) -> Result<SendableRecordBatchStream> {
-        Ok(self.reader.launch(0, self.recycle))
+impl PartitionedSource for IoUringSource {
+    async fn stream_partition(
+        &mut self,
+        index: super::PartitionIdx,
+    ) -> Result<SendableRecordBatchStream> {
+        Ok(self.reader.launch(index.0, self.recycle, self.direct_io))
     }
 
-    fn into_partitioned(self) -> Self::PartitionedSource {
-        empty::EmptySource::new(self.schema)
+    fn partition_count(&self) -> usize {
+        self.partition_count
+    }
+
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
     }
 }
 
-impl LazyPartitionBuffer for IoUringSpillBuffer {
+impl PartitionBuffer for IoUringSpillBuffer {
     type Sink = IoUringSink;
     type Source = IoUringSource;
 
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
         let file = self.runtime.disk_manager.create_tmp_file(Self::NAME)?;
-        let writer =
-            io::uring::Writer::new(file.path().to_owned(), Arc::clone(&schema), 1);
+        let writer = io::uring::Writer::new(
+            file.path().to_owned(),
+            Arc::clone(&schema),
+            self.partition_count(),
+        );
         Ok(Self::Sink {
             file,
             schema,
@@ -79,11 +105,13 @@ impl LazyPartitionBuffer for IoUringSpillBuffer {
             schema: sink.schema,
             reader,
             recycle: self.recycle,
+            direct_io: self.direct_io,
+            partition_count: self.partition_count,
         };
         Ok(source)
     }
 
     fn partition_count(&self) -> usize {
-        0
+        self.partition_count
     }
 }

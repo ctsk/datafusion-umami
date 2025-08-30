@@ -8,20 +8,17 @@ use arrow::buffer::Buffer;
 
 pub struct SendablePool {
     inner: Mutex<Vec<memmap2::MmapMut>>,
-    alloc_size: usize,
 }
 
 impl SendablePool {
-    pub fn new(alloc_size: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Default::default(),
-            alloc_size,
         }
     }
 
-    fn allocate_new_page(&self) -> memmap2::MmapMut {
-        memmap2::MmapMut::map_anon(self.alloc_size)
-            .expect("Failed to allocate spill page")
+    fn allocate_new_page(size: usize) -> memmap2::MmapMut {
+        memmap2::MmapMut::map_anon(size).expect("Failed to allocate spill page")
     }
 }
 
@@ -88,13 +85,13 @@ impl super::Page for SendablePage {
 impl super::Pool for Arc<SendablePool> {
     type Page = SendablePage;
 
-    fn issue_page(&self, size: usize) -> SendablePage {
+    fn issue_page(&self, _target: usize, upper_bound: usize) -> SendablePage {
         let buffer = match self.inner.lock().unwrap().pop() {
             Some(buffer) => buffer,
-            None => self.allocate_new_page(),
+            None => SendablePool::allocate_new_page(upper_bound),
         };
 
-        assert!(size <= buffer.len());
+        assert!(upper_bound <= buffer.len());
 
         SendablePage {
             pool: Arc::clone(&self),

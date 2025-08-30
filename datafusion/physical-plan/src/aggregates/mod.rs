@@ -645,7 +645,10 @@ impl AggregateExec {
         )?;
         let input = self.input.execute(partition, Arc::clone(&context))?;
         let expr = self.group_by.input_exprs();
-        let input = InputKind::Unary { input, expr };
+        let input = InputKind::Unary {
+            input,
+            expr: expr.into(),
+        };
         let wrapped = crate::umami::apply(Box::new(factory), input, partition, context)?;
         Ok(StreamType::Generic(wrapped))
     }

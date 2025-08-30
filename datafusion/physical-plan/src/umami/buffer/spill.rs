@@ -10,6 +10,7 @@ use datafusion_execution::{
 use crate::{
     metrics::{ExecutionPlanMetricsSet, SpillMetrics},
     spill::in_progress_spill_file::InProgressSpillFile,
+    utils::RowExpr,
     EmptyRecordBatchStream, SpillManager,
 };
 
@@ -32,7 +33,7 @@ impl LazyPartitionBuffer for SpillBuffer {
     type Sink = SpillSink;
     type Source = SpillSource;
 
-    fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
+    fn make_sink(&mut self, schema: SchemaRef, _key: RowExpr) -> Result<Self::Sink> {
         let manager = SpillManager::new(
             Arc::clone(&self.runtime),
             SpillMetrics::new(&self.metrics, 0),
@@ -107,6 +108,6 @@ impl super::LazyPartitionedSource for SpillSource {
     }
 
     fn into_partitioned(self) -> Self::PartitionedSource {
-        super::empty::EmptySource::new(self.schema)
+        super::empty::EmptySource::new(self.schema, 0)
     }
 }

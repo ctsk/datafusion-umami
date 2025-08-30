@@ -100,15 +100,23 @@ impl PartitionedSource for MemorySource {
     async fn stream_partition(
         &mut self,
         index: super::PartitionIdx,
-    ) -> SendableRecordBatchStream {
-        Box::pin(
+    ) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(
             MemoryStream::try_new(
                 std::mem::take(&mut self.partitioned[index.0]),
                 Arc::clone(&self.schema),
                 None,
             )
             .unwrap(),
-        )
+        ))
+    }
+
+    fn partition_count(&self) -> usize {
+        0
+    }
+
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
     }
 }
 
@@ -119,7 +127,7 @@ impl LazyPartitionBuffer for MemoryBuffer {
     type Sink = MemorySink;
     type Source = MemorySource;
 
-    fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
+    fn make_sink(&mut self, schema: SchemaRef, _key: RowExpr) -> Result<Self::Sink> {
         Ok(MemorySink {
             schema,
             buffers: vec![],
@@ -163,7 +171,7 @@ impl LazyPartitionBuffer for PartitionMemoryBuffer {
     type Sink = PartitionedMemorySink;
     type Source = MemorySource;
 
-    fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
+    fn make_sink(&mut self, schema: SchemaRef, _key: RowExpr) -> Result<Self::Sink> {
         Ok(PartitionedMemorySink::new(
             self.expr.clone(),
             self.random_state.clone(),

@@ -24,9 +24,9 @@ impl super::Page for AllocPage {
 impl super::Pool for AllocPool {
     type Page = AllocPage;
 
-    fn issue_page(&self, size: usize) -> Self::Page {
-        Self::Page {
-            inner: MutableBuffer::new(size),
-        }
+    fn issue_page(&self, target: usize, _upper_bound: usize) -> Self::Page {
+        let mut mbuf = MutableBuffer::new(target);
+        unsafe { mbuf.set_len(target) };
+        Self::Page { inner: mbuf }
     }
 }

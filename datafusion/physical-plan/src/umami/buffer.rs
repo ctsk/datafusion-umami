@@ -16,7 +16,7 @@ mod uring_spill;
 #[allow(unused_imports)]
 pub use adaptive::AdaptiveBuffer;
 #[allow(unused_imports)]
-pub use adaptive::AdaptiveSinkConfig;
+pub use adaptive::StaticHybridSinkConfig;
 pub use async_spill::AsyncSpillBuffer;
 #[allow(unused_imports)]
 pub use memory::MemoryBuffer;
@@ -25,17 +25,35 @@ pub use memory::PartitionMemoryBuffer;
 pub use spill::SpillBuffer;
 pub use uring_spill::IoUringSpillBuffer;
 
+use crate::utils::RowExpr;
+
 pub struct PartitionIdx(pub usize);
 
 pub trait Sink {
     fn push(&mut self, batch: RecordBatch) -> impl Future<Output = Result<()>> + Send;
 }
 
+pub trait PartitionedSink {
+    fn push_to_part(
+        &mut self,
+        batch: RecordBatch,
+        part: usize,
+    ) -> impl Future<Output = Result<()>> + Send;
+}
+
 pub trait PartitionedSource {
     fn stream_partition(
         &mut self,
         index: PartitionIdx,
-    ) -> impl Future<Output = SendableRecordBatchStream> + Send;
+    ) -> impl Future<Output = Result<SendableRecordBatchStream>> + Send;
+
+    fn partition_sequence(&self) -> impl Iterator<Item = usize> {
+        0..self.partition_count()
+    }
+
+    fn partition_count(&self) -> usize;
+
+    fn schema(&self) -> SchemaRef;
 }
 
 pub trait LazyPartitionedSource {
@@ -52,10 +70,45 @@ pub trait LazyPartitionBuffer {
     type Sink: Sink + Send;
     type Source: LazyPartitionedSource + Send;
 
+    fn make_sink(&mut self, schema: SchemaRef, key: RowExpr) -> Result<Self::Sink>;
+    fn make_source(
+        &mut self,
+        sink: Self::Sink,
+    ) -> impl Future<Output = Result<Self::Source>> + Send;
+    fn partition_count(&self) -> usize;
+}
+
+pub trait PartitionBuffer {
+    type Sink: PartitionedSink + Send;
+    type Source: PartitionedSource + Send;
+
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink>;
     fn make_source(
         &mut self,
         sink: Self::Sink,
     ) -> impl Future<Output = Result<Self::Source>> + Send;
     fn partition_count(&self) -> usize;
+}
+
+impl<S: PartitionedSink> Sink for S {
+    fn push(&mut self, batch: RecordBatch) -> impl Future<Output = Result<()>> + Send {
+        self.push_to_part(batch, 0)
+    }
+}
+
+struct LazySourceAdapter<S>(S);
+
+impl<S: PartitionedSource + Send> LazyPartitionedSource for LazySourceAdapter<S> {
+    type PartitionedSource = S;
+
+    fn unpartitioned(
+        &mut self,
+    ) -> impl Future<Output = Result<SendableRecordBatchStream>> + Send {
+        let schema = self.0.schema();
+        async { empty::EmptySource::new(schema, 0).unpartitioned().await }
+    }
+
+    fn into_partitioned(self) -> Self::PartitionedSource {
+        self.0
+    }
 }

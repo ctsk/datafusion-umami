@@ -26,3 +26,11 @@ impl FromIterator<PhysicalExprRef> for RowExpr {
         }
     }
 }
+
+impl From<Vec<PhysicalExprRef>> for RowExpr {
+    fn from(value: Vec<PhysicalExprRef>) -> Self {
+        Self {
+            exprs: value.into(),
+        }
+    }
+}

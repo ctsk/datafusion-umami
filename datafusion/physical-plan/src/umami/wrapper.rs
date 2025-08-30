@@ -12,11 +12,11 @@ use crate::{
         },
         BasicStreamProvider,
     },
+    utils::RowExpr,
 };
 use arrow::array::RecordBatch;
 use datafusion_common::Result;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
-use datafusion_physical_expr::PhysicalExprRef;
 use futures::{stream::BoxStream, Stream, StreamExt};
 
 use super::StreamFactory;
@@ -35,33 +35,36 @@ pub type DefaultMaterializeWrapper = MaterializeWrapper<buffer::IoUringSpillBuff
 pub enum InputKind {
     Unary {
         input: SendableRecordBatchStream,
-        expr: Vec<PhysicalExprRef>,
+        expr: RowExpr,
     },
     Binary {
         left: SendableRecordBatchStream,
-        left_expr: Vec<PhysicalExprRef>,
+        left_expr: RowExpr,
         right: SendableRecordBatchStream,
-        right_expr: Vec<PhysicalExprRef>,
+        right_expr: RowExpr,
     },
     Placeholder,
 }
 
 impl InputKind {
-    pub fn unary(input: SendableRecordBatchStream, expr: Vec<PhysicalExprRef>) -> Self {
-        Self::Unary { input, expr }
+    pub fn unary(input: SendableRecordBatchStream, expr: impl Into<RowExpr>) -> Self {
+        Self::Unary {
+            input,
+            expr: expr.into(),
+        }
     }
 
     pub fn binary(
         left: SendableRecordBatchStream,
-        left_expr: Vec<PhysicalExprRef>,
+        left_expr: impl Into<RowExpr>,
         right: SendableRecordBatchStream,
-        right_expr: Vec<PhysicalExprRef>,
+        right_expr: impl Into<RowExpr>,
     ) -> Self {
         Self::Binary {
             left,
-            left_expr,
+            left_expr: left_expr.into(),
             right,
-            right_expr,
+            right_expr: right_expr.into(),
         }
     }
 }
@@ -155,9 +158,9 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         mut self,
         output: &mut Output,
         stream: SendableRecordBatchStream,
-        _expr: Vec<PhysicalExprRef>,
+        expr: RowExpr,
     ) -> Result<()> {
-        let mut sink = Buffer::make_sink(&mut self.buffer, stream.schema())?;
+        let mut sink = Buffer::make_sink(&mut self.buffer, stream.schema(), expr)?;
         Self::buffer(stream, &mut sink).await?;
         let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
         Self::assemble_and_produce(
@@ -170,7 +173,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         if self.buffer.partition_count() > 0 {
             let mut source = source.into_partitioned();
             for partition in 0..self.buffer.partition_count() {
-                let stream = source.stream_partition(PartitionIdx(partition)).await;
+                let stream = source.stream_partition(PartitionIdx(partition)).await?;
                 Self::assemble_and_produce(&mut self, Box::new([stream]), output).await?;
             }
         }
@@ -181,15 +184,17 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         mut self,
         output: &mut Output,
         left: SendableRecordBatchStream,
-        _left_expr: Vec<PhysicalExprRef>,
+        left_expr: RowExpr,
         right: SendableRecordBatchStream,
-        _right_expr: Vec<PhysicalExprRef>,
+        right_expr: RowExpr,
     ) -> Result<()> {
         assert!(self.buffer.partition_count() == 0);
 
-        let mut left_sink = Buffer::make_sink(&mut self.buffer, left.schema())?;
+        let mut left_sink =
+            Buffer::make_sink(&mut self.buffer, left.schema(), left_expr)?;
         Self::buffer(left, &mut left_sink).await?;
-        let mut right_sink = Buffer::make_sink(&mut self.buffer, right.schema())?;
+        let mut right_sink =
+            Buffer::make_sink(&mut self.buffer, right.schema(), right_expr)?;
         Self::buffer(right, &mut right_sink).await?;
 
         let mut left_source = Buffer::make_source(&mut self.buffer, left_sink).await?;

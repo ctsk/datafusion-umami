@@ -15,7 +15,6 @@ use crate::common::collect;
 use crate::joins::test_utils::compare_batches;
 use crate::metrics::ExecutionPlanMetricsSet;
 use crate::umami::buffer::AdaptiveBuffer;
-use crate::umami::buffer::AdaptiveSinkConfig;
 use crate::umami::buffer::IoUringSpillBuffer;
 use crate::umami::buffer::LazyPartitionBuffer;
 use crate::umami::buffer::LazyPartitionedSource;
@@ -24,6 +23,7 @@ use crate::umami::buffer::PartitionMemoryBuffer;
 use crate::umami::buffer::PartitionedSource;
 use crate::umami::buffer::Sink;
 use crate::umami::buffer::SpillBuffer;
+use crate::umami::buffer::StaticHybridSinkConfig;
 use crate::umami::wrapper::InputKind;
 use crate::utils::RowExpr;
 use crate::{
@@ -92,7 +92,9 @@ async fn roundtrip<T: BufferCreator>(data: Vec<RecordBatch>) -> Result<()> {
     let schema = data[0].schema();
     let task_ctx = Arc::new(TaskContext::default());
     let mut buf = T::new(Arc::clone(&schema), task_ctx);
-    let mut sink = buf.make_sink(Arc::clone(&schema))?;
+    let name = schema.field(0).name();
+    let keys: RowExpr = [col(name, &schema).unwrap()].into_iter().collect();
+    let mut sink = buf.make_sink(Arc::clone(&schema), keys)?;
     for batch in data.iter() {
         sink.push(batch.clone()).await?;
     }
@@ -106,7 +108,7 @@ async fn roundtrip<T: BufferCreator>(data: Vec<RecordBatch>) -> Result<()> {
 
     let mut source = source.into_partitioned();
     for p in 0..buf.partition_count() {
-        let stream = source.stream_partition(PartitionIdx(p)).await;
+        let stream = source.stream_partition(PartitionIdx(p)).await?;
         let mut batches: Vec<_> = stream.try_collect().await?;
         out.append(&mut batches);
     }
@@ -159,39 +161,18 @@ async fn test_buffer_mem_partition() -> Result<()> {
 async fn test_adaptive_buffer() -> Result<()> {
     struct BC {}
     impl BufferCreator for BC {
-        type Buf = AdaptiveBuffer;
-        fn new(schema: SchemaRef, _ctx: Arc<TaskContext>) -> Self::Buf {
-            let name = schema.field(0).name();
-            let keys: RowExpr = [col(name, &schema).unwrap()].into_iter().collect();
-            let config = AdaptiveSinkConfig { partition_start: 1 };
+        type Buf = AdaptiveBuffer<IoUringSpillBuffer>;
+        fn new(_schema: SchemaRef, _ctx: Arc<TaskContext>) -> Self::Buf {
+            let config = StaticHybridSinkConfig {
+                partition_start: 100,
+                delegate_start: 200,
+            };
+            let inner = IoUringSpillBuffer::new(_ctx.runtime_env(), false, false, 4);
             AdaptiveBuffer::builder()
-                .key_expr(keys)
                 .num_partitions(4)
-                .schema(schema)
                 .sink_config(config)
+                .delegate(inner)
                 .build()
-        }
-    }
-    test_buffer_generic::<BC>().await?;
-    let rb = record_batch!(
-        ("num", Int32, Vec::from_iter(0..100)),
-        (
-            "val",
-            Utf8,
-            Vec::from_iter((0..100).map(|v| format!("value_{v}")))
-        )
-    )?;
-    let rb = vec![rb; 10];
-    roundtrip::<BC>(rb).await
-}
-
-#[tokio::test]
-async fn test_buffer_uring() -> Result<()> {
-    struct BC {}
-    impl BufferCreator for BC {
-        type Buf = IoUringSpillBuffer;
-        fn new(_schema: SchemaRef, ctx: Arc<TaskContext>) -> Self::Buf {
-            IoUringSpillBuffer::new(ctx.runtime_env(), true)
         }
     }
     test_buffer_generic::<BC>().await?;

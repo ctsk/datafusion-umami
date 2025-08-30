@@ -899,6 +899,8 @@ config_namespace! {
     pub struct ExperimentalOptions {
         /// Should the io_uring OOM reader try to recycle pages?
         pub recycle: bool, default = false
+        /// Should the io_uring OOM reader use direct I/O?
+        pub direct_io: bool, default = false
     }
 }
 
