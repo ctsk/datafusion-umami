@@ -10,6 +10,7 @@ use datafusion_execution::{
 use crate::{
     metrics::{ExecutionPlanMetricsSet, SpillMetrics},
     spill::in_progress_spill_file::InProgressSpillFile,
+    umami::buffer::SinglePartAdapter,
     utils::RowExpr,
     EmptyRecordBatchStream, SpillManager,
 };
@@ -30,7 +31,7 @@ impl SpillBuffer {
 }
 
 impl LazyPartitionBuffer for SpillBuffer {
-    type Sink = SpillSink;
+    type Sink = SinglePartAdapter<SpillSink>;
     type Source = SpillSource;
 
     fn make_sink(&mut self, schema: SchemaRef, _key: RowExpr) -> Result<Self::Sink> {
@@ -40,17 +41,19 @@ impl LazyPartitionBuffer for SpillBuffer {
             Arc::clone(&schema),
         );
         let writer = manager.create_in_progress_file(NAME)?;
-        Ok(Self::Sink {
-            schema,
-            manager: Arc::new(manager),
-            writer,
+        Ok(SinglePartAdapter {
+            inner: SpillSink {
+                schema,
+                manager: Arc::new(manager),
+                writer,
+            },
         })
     }
 
     async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
-        let schema = sink.schema;
-        let manager = Arc::clone(&sink.manager);
-        let spill_file = sink.writer.finish()?;
+        let schema = sink.inner.schema;
+        let manager = Arc::clone(&sink.inner.manager);
+        let spill_file = sink.inner.writer.finish()?;
         Ok(Self::Source {
             schema,
             manager,
@@ -69,8 +72,9 @@ pub struct SpillSink {
     writer: InProgressSpillFile,
 }
 
-impl super::Sink for SpillSink {
-    async fn push(&mut self, batch: RecordBatch) -> Result<()> {
+impl super::PartitionedSink for SpillSink {
+    async fn push_to_part(&mut self, batch: RecordBatch, partition: usize) -> Result<()> {
+        assert!(partition == 0);
         self.writer.append_batch(&batch)
     }
 }

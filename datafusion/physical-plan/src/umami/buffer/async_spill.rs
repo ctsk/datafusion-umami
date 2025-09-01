@@ -5,6 +5,7 @@ use arrow_schema::SchemaRef;
 use datafusion_common::Result;
 
 use crate::umami::buffer::LazyPartitionBuffer;
+use crate::umami::buffer::SinglePartAdapter;
 use crate::umami::io::pinned_writer::make_pinned;
 use crate::umami::io::pinned_writer::PinnedHandle;
 use crate::umami::{io::AsyncBatchWriter, InProgressSpillFileWithParts};
@@ -18,9 +19,9 @@ pub struct SpillSink {
     writer: PinnedHandle<InProgressSpillFileWithParts>,
 }
 
-impl super::Sink for SpillSink {
-    async fn push(&mut self, batch: RecordBatch) -> Result<()> {
-        self.writer.write(batch, 0).await
+impl super::PartitionedSink for SpillSink {
+    async fn push_to_part(&mut self, batch: RecordBatch, part: usize) -> Result<()> {
+        self.writer.write(batch, part).await
     }
 }
 
@@ -37,20 +38,22 @@ impl AsyncSpillBuffer {
 }
 
 impl LazyPartitionBuffer for AsyncSpillBuffer {
-    type Sink = SpillSink;
+    type Sink = SinglePartAdapter<SpillSink>;
     type Source = super::spill::SpillSource;
 
     fn make_sink(&mut self, schema: SchemaRef, _key: RowExpr) -> Result<Self::Sink> {
         let ipsf = self.manager.create_in_progress_file(NAME)?;
         let ipsfwp = InProgressSpillFileWithParts::new(ipsf);
         let writer = make_pinned(|| ipsfwp);
-        Ok(Self::Sink { schema, writer })
+        Ok(Self::Sink {
+            inner: SpillSink { schema, writer },
+        })
     }
 
     async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
-        let schema = sink.schema;
+        let schema = sink.inner.schema;
         let manager = Arc::clone(&self.manager);
-        let spill_file = sink.writer.finish().await?.map(|f| f.file);
+        let spill_file = sink.inner.writer.finish().await?.map(|f| f.file);
         Ok(super::spill::SpillSource::new(schema, manager, spill_file))
     }
 

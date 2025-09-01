@@ -13,18 +13,6 @@ use crate::{
     utils::RowExpr,
 };
 
-pub struct MemorySink {
-    schema: SchemaRef,
-    buffers: Vec<RecordBatch>,
-}
-
-impl super::Sink for MemorySink {
-    async fn push(&mut self, batch: RecordBatch) -> Result<()> {
-        self.buffers.push(batch);
-        Ok(())
-    }
-}
-
 pub struct PartitionedMemorySink {
     partitioner: Partitioner,
     schema: SchemaRef,
@@ -46,12 +34,27 @@ impl PartitionedMemorySink {
     }
 }
 
+impl super::PartitionedSink for PartitionedMemorySink {
+    async fn push_to_part(&mut self, batch: RecordBatch, part: usize) -> Result<()> {
+        self.buffers[part].push(batch);
+        Ok(())
+    }
+}
+
 impl super::Sink for PartitionedMemorySink {
     async fn push(&mut self, batch: RecordBatch) -> Result<()> {
-        let batches = self.partitioner.partition(&[batch])?;
-        for (part, batch) in batches.into_iter().enumerate() {
-            self.buffers[part].push(batch);
+        if self.buffers.len() > 1 {
+            let batches = self.partitioner.partition(&[batch])?;
+            for (part, batch) in batches.into_iter().enumerate() {
+                self.buffers[part].push(batch);
+            }
+        } else {
+            self.buffers[0].push(batch);
         }
+        Ok(())
+    }
+
+    async fn force_partition(&mut self) -> Result<()> {
         Ok(())
     }
 }
@@ -117,33 +120,6 @@ impl PartitionedSource for MemorySource {
 
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
-    }
-}
-
-#[derive(Default)]
-pub struct MemoryBuffer {}
-
-impl LazyPartitionBuffer for MemoryBuffer {
-    type Sink = MemorySink;
-    type Source = MemorySource;
-
-    fn make_sink(&mut self, schema: SchemaRef, _key: RowExpr) -> Result<Self::Sink> {
-        Ok(MemorySink {
-            schema,
-            buffers: vec![],
-        })
-    }
-
-    async fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
-        Ok(MemorySource {
-            schema: sink.schema,
-            unpartitioned: sink.buffers,
-            partitioned: vec![],
-        })
-    }
-
-    fn partition_count(&self) -> usize {
-        0
     }
 }
 

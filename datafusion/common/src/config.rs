@@ -901,6 +901,8 @@ config_namespace! {
         pub recycle: bool, default = false
         /// Should the io_uring OOM reader use direct I/O?
         pub direct_io: bool, default = false
+        /// Should a hybrid join be used? (else: grace join)
+        pub hybrid_join: bool, default = true
     }
 }
 

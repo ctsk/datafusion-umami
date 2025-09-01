@@ -31,6 +31,10 @@ impl Partitioner {
         }
     }
 
+    pub fn get_seed(&self) -> ahash::RandomState {
+        self.random_state.clone()
+    }
+
     pub fn partition(&mut self, batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
         scatter_partition(
             &self.key,

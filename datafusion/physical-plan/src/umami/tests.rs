@@ -27,9 +27,7 @@ use crate::umami::buffer::StaticHybridSinkConfig;
 use crate::umami::wrapper::InputKind;
 use crate::utils::RowExpr;
 use crate::{
-    projection::ProjectionExec,
-    test::TestMemoryExec,
-    umami::{buffer::MemoryBuffer, wrapper::MaterializeWrapper},
+    projection::ProjectionExec, test::TestMemoryExec, umami::wrapper::MaterializeWrapper,
     ExecutionPlan,
 };
 
@@ -116,18 +114,6 @@ async fn roundtrip<T: BufferCreator>(data: Vec<RecordBatch>) -> Result<()> {
     compare_batches(&data, &out);
 
     Ok(())
-}
-
-#[tokio::test]
-async fn test_buffer_mem() -> Result<()> {
-    struct BC {}
-    impl BufferCreator for BC {
-        type Buf = MemoryBuffer;
-        fn new(_schema: SchemaRef, _ctx: Arc<TaskContext>) -> Self::Buf {
-            MemoryBuffer::default()
-        }
-    }
-    test_buffer_generic::<BC>().await
 }
 
 #[tokio::test]

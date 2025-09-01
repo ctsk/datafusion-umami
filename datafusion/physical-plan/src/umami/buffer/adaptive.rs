@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use ahash::RandomState;
 use arrow::record_batch::RecordBatch;
@@ -10,8 +10,13 @@ use datafusion_execution::SendableRecordBatchStream;
 use crate::{
     memory::MemoryStream,
     repartition::Partitioner,
-    umami::buffer::{
-        LazyPartitionBuffer, PartitionBuffer, PartitionedSink, PartitionedSource,
+    umami::{
+        buffer::{
+            LazyPartitionBuffer, PartState, PartitionBuffer, PartitionIdx,
+            PartitionedSink, PartitionedSource,
+        },
+        filter,
+        report::BufferReport,
     },
     utils::RowExpr,
 };
@@ -25,12 +30,6 @@ pub struct StaticHybridSinkConfig {
 enum SinkState {
     Unpartition,
     Partition,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum PartState {
-    Owned,
-    Delegated,
 }
 
 pub struct AdaptiveSink<Inner> {
@@ -48,19 +47,22 @@ pub struct AdaptiveSink<Inner> {
 }
 
 impl<Inner> AdaptiveSink<Inner> {
-    pub fn new(
+    fn new(
         config: StaticHybridSinkConfig,
         expr: RowExpr,
         num_partitions: usize,
         random_state: RandomState,
         inner: Inner,
         schema: SchemaRef,
+        mask: Option<Vec<PartState>>,
     ) -> Self {
-        let state = if config.partition_start > 0 {
+        let state = if config.partition_start > 0 && mask.is_none() {
             SinkState::Unpartition
         } else {
             SinkState::Partition
         };
+
+        let mask = mask.unwrap_or_else(|| vec![PartState::Owned; num_partitions]);
 
         Self {
             config,
@@ -70,7 +72,7 @@ impl<Inner> AdaptiveSink<Inner> {
             unpartitioned: vec![],
             partitioned_total: 0,
             partitioned_sizes: vec![0; num_partitions],
-            partitioned_state: vec![PartState::Owned; num_partitions],
+            partitioned_state: mask,
             partitioned: vec![vec![]; num_partitions],
             inner,
             schema,
@@ -91,6 +93,7 @@ impl<Inner> AdaptiveSink<Inner> {
             RandomState::new(),
             inner,
             schema,
+            None,
         )
     }
 
@@ -117,6 +120,43 @@ impl<Inner> AdaptiveSink<Inner> {
     }
 }
 
+impl<Inner: PartitionedSink + Send> PartitionedSink for AdaptiveSink<Inner> {
+    async fn push_to_part(&mut self, batch: RecordBatch, part: usize) -> Result<()> {
+        match self.partitioned_state[part] {
+            PartState::Owned => {
+                self.partitioned_sizes[part] += utils::batch_size_shared(&batch) as u64;
+                self.partitioned[part].push(batch);
+                Ok(())
+            }
+            PartState::Delegated => self.inner.push_to_part(batch, part).await,
+        }
+    }
+}
+
+impl<Inner: PartitionedSink + Send> AdaptiveSink<Inner> {
+    async fn partition_and_push(&mut self, range: Range<usize>) -> Result<()> {
+        let parts = self.partitioner.partition(&self.unpartitioned[range])?;
+
+        for (p, batch) in parts.into_iter().enumerate() {
+            if batch.num_rows() > 0 {
+                match self.partitioned_state[p] {
+                    PartState::Owned => {
+                        let size = utils::batch_size_shared(&batch) as u64;
+                        self.partitioned_sizes[p] += size;
+                        self.partitioned_total += size;
+                        self.partitioned[p].push(batch);
+                    }
+                    PartState::Delegated => {
+                        self.inner.push_to_part(batch, p).await?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl<Inner: PartitionedSink + Send> super::Sink for AdaptiveSink<Inner> {
     async fn push(&mut self, batch: RecordBatch) -> Result<()> {
         match self.state {
@@ -134,24 +174,11 @@ impl<Inner: PartitionedSink + Send> super::Sink for AdaptiveSink<Inner> {
                 // Partition `target_chunk_size` batches at once to avoid producing too small output batches
                 let target_chunk_size = self.num_partitions().min(32);
                 let start = self.unpartitioned.len().saturating_sub(target_chunk_size);
-                let parts = self.partitioner.partition(&self.unpartitioned[start..])?;
-                for batch in self.unpartitioned.drain(start..) {
+                let range = start..self.unpartitioned.len();
+                self.partition_and_push(range.clone()).await?;
+
+                for batch in self.unpartitioned.drain(range) {
                     self.unpartitioned_size -= utils::batch_size_shared(&batch) as u64;
-                }
-                for (p, batch) in parts.into_iter().enumerate() {
-                    if batch.num_rows() > 0 {
-                        match self.partitioned_state[p] {
-                            PartState::Owned => {
-                                let size = utils::batch_size_shared(&batch) as u64;
-                                self.partitioned_sizes[p] += size;
-                                self.partitioned_total += size;
-                                self.partitioned[p].push(batch);
-                            }
-                            PartState::Delegated => {
-                                self.inner.push_to_part(batch, p).await?;
-                            }
-                        }
-                    }
                 }
 
                 while self.should_evict() {
@@ -172,6 +199,20 @@ impl<Inner: PartitionedSink + Send> super::Sink for AdaptiveSink<Inner> {
 
         Ok(())
     }
+
+    async fn force_partition(&mut self) -> Result<()> {
+        let len = self.unpartitioned.len();
+        let chunk_size = self.num_partitions().min(32);
+
+        for start in (0..len).step_by(chunk_size) {
+            let end = (start + chunk_size).min(len);
+            self.partition_and_push(start..end).await?;
+        }
+
+        self.unpartitioned.clear();
+        self.unpartitioned_size = 0;
+        Ok(())
+    }
 }
 
 pub struct AdaptiveSource<Inner> {
@@ -184,7 +225,7 @@ pub struct AdaptiveSource<Inner> {
 impl<Inner: PartitionedSource + Send> PartitionedSource for AdaptiveSource<Inner> {
     async fn stream_partition(
         &mut self,
-        index: super::PartitionIdx,
+        index: PartitionIdx,
     ) -> Result<SendableRecordBatchStream> {
         match self.partitioned_state[index.0] {
             PartState::Owned => Ok(Box::pin(MemoryStream::try_new(
@@ -231,14 +272,16 @@ impl<Inner: PartitionedSource + Send> super::LazyPartitionedSource
     }
 }
 
-#[derive(bon::Builder)]
+#[derive(bon::Builder, Clone)]
 pub struct AdaptiveBuffer<Inner: PartitionBuffer + Send> {
     sink_config: StaticHybridSinkConfig,
     num_partitions: usize,
     delegate: Inner,
 }
 
-impl<Inner: PartitionBuffer + Send> LazyPartitionBuffer for AdaptiveBuffer<Inner> {
+impl<Inner: PartitionBuffer + Send + 'static> LazyPartitionBuffer
+    for AdaptiveBuffer<Inner>
+{
     type Sink = AdaptiveSink<Inner::Sink>;
     type Source = AdaptiveSource<Inner::Source>;
 
@@ -252,6 +295,54 @@ impl<Inner: PartitionBuffer + Send> LazyPartitionBuffer for AdaptiveBuffer<Inner
             inner,
             schema,
         ))
+    }
+
+    fn make_filtered_stream(
+        &mut self,
+        sink: &Self::Sink,
+        stream: SendableRecordBatchStream,
+        key: RowExpr,
+    ) -> Result<(SendableRecordBatchStream, filter::Airlock<Self::Sink>)> {
+        let inner = self.delegate.make_sink(Arc::clone(&stream.schema()))?;
+        let sink = Self::Sink::new(
+            self.sink_config.clone(),
+            key.clone(),
+            self.num_partitions,
+            sink.partitioner.get_seed(),
+            inner,
+            stream.schema(),
+            Some(sink.partitioned_state.clone()),
+        );
+        let (filter, airlock) = filter::PartingFilter::new(
+            stream,
+            key,
+            sink.partitioner.get_seed(),
+            sink.num_partitions(),
+            sink.partitioned_state
+                .iter()
+                .map(|ps| *ps == PartState::Delegated)
+                .collect(),
+            sink,
+        );
+        Ok((filter.stream(), airlock))
+    }
+
+    fn probe_sink(&self, sink: &Self::Sink) -> BufferReport {
+        let owned = |i: &usize| sink.partitioned_state[*i] == PartState::Owned;
+        let delegated = |i: &usize| sink.partitioned_state[*i] == PartState::Delegated;
+        let parts_in_mem = (0..sink.partitioned_state.len())
+            .filter(owned)
+            .map(PartitionIdx)
+            .collect();
+        let parts_oom = (0..sink.partitioned_state.len())
+            .filter(delegated)
+            .map(PartitionIdx)
+            .collect();
+        BufferReport {
+            unpart_batches: sink.unpartitioned.len(),
+            parts_in_mem,
+            parts_oom,
+        }
     }
 
     async fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {

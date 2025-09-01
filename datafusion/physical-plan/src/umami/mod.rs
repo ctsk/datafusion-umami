@@ -2,7 +2,9 @@
 
 mod buffer;
 mod factory;
+mod filter;
 mod io;
+mod report;
 #[cfg(test)]
 mod tests;
 mod wrapper;
@@ -19,7 +21,6 @@ pub use factory::BasicStreamProvider;
 pub use factory::StreamFactory;
 pub use factory::StreamProvider;
 use io::spill::InProgressSpillFileWithParts;
-pub use wrapper::DefaultMaterializeWrapper;
 pub use wrapper::InputKind;
 pub use wrapper::MaterializeWrapper;
 
