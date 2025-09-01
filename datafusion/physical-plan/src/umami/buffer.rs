@@ -70,7 +70,7 @@ pub trait PartitionedSource: Send {
                 }
             }
 
-            Ok(Box::pin(ChainedStream::new(streams[0].schema(), streams)) as _)
+            Ok(ChainedStream::new(streams[0].schema(), streams).stream())
         }
     }
 
@@ -87,6 +87,10 @@ pub trait LazyPartitionedSource {
     type PartitionedSource: PartitionedSource + Send;
 
     fn unpartitioned(
+        &mut self,
+    ) -> impl Future<Output = Result<SendableRecordBatchStream>> + Send;
+
+    fn all_in_mem(
         &mut self,
     ) -> impl Future<Output = Result<SendableRecordBatchStream>> + Send;
 
@@ -166,5 +170,9 @@ impl<S: PartitionedSource + Send> LazyPartitionedSource for LazySourceAdapter<S>
 
     fn into_partitioned(self) -> Self::PartitionedSource {
         self.0
+    }
+
+    async fn all_in_mem(&mut self) -> Result<SendableRecordBatchStream> {
+        unimplemented!()
     }
 }

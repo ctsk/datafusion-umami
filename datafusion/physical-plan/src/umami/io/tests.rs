@@ -12,7 +12,8 @@ async fn test_uring_writer() -> Result<()> {
         ("name", Utf8, vec!["foo"; 42])
     )?;
 
-    let mut writer = super::uring::Writer::new(tmppath.path().into(), data.schema(), 4);
+    let mut writer =
+        super::uring::Writer::new(tmppath.path().into(), data.schema(), 4, true);
     writer.write(data.clone(), 2).await?;
     writer.write(data.clone(), 1).await?;
     writer.write(data.clone(), 2).await?;

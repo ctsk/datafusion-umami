@@ -900,7 +900,15 @@ config_namespace! {
         /// Should the io_uring OOM reader try to recycle pages?
         pub recycle: bool, default = false
         /// Should the io_uring OOM reader use direct I/O?
-        pub direct_io: bool, default = false
+        pub direct_io_reader: bool, default = false
+        /// Should the io_uring OOM writer use direct I/O?
+        pub direct_io_writer: bool, default = false
+        /// Size of the uring queue of the reader
+        pub uring_depth_reader: usize, default = 16
+        /// Size of the uring queue of the reader
+        pub uring_depth_writer: usize, default = 16
+        /// Minimum write size (in bytes) size of the OOM writer
+        pub write_buffer_size: usize, default = 64 * (1 << 10)
         /// Should a hybrid join be used? (else: grace join)
         pub hybrid_join: bool, default = true
     }

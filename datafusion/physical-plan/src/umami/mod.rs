@@ -36,7 +36,8 @@ pub fn apply(
     let buffer = IoUringSpillBuffer::new(
         context.runtime_env(),
         context.session_config().options().x.recycle,
-        context.session_config().options().x.direct_io,
+        context.session_config().options().x.direct_io_reader,
+        context.session_config().options().x.direct_io_writer,
         16,
     );
     let buffer = AdaptiveBuffer::builder()

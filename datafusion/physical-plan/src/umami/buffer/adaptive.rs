@@ -13,7 +13,7 @@ use crate::{
     umami::{
         buffer::{
             LazyPartitionBuffer, PartState, PartitionBuffer, PartitionIdx,
-            PartitionedSink, PartitionedSource,
+            PartitionedSink, PartitionedSource, Sink,
         },
         filter,
         report::BufferReport,
@@ -157,7 +157,7 @@ impl<Inner: PartitionedSink + Send> AdaptiveSink<Inner> {
     }
 }
 
-impl<Inner: PartitionedSink + Send> super::Sink for AdaptiveSink<Inner> {
+impl<Inner: PartitionedSink + Send> Sink for AdaptiveSink<Inner> {
     async fn push(&mut self, batch: RecordBatch) -> Result<()> {
         match self.state {
             SinkState::Unpartition => {
@@ -270,6 +270,22 @@ impl<Inner: PartitionedSource + Send> super::LazyPartitionedSource
     fn into_partitioned(self) -> Self::PartitionedSource {
         self
     }
+
+    async fn all_in_mem(&mut self) -> Result<SendableRecordBatchStream> {
+        let mut batches = std::mem::take(&mut self.unpartitioned);
+        for (_, mut pbatches) in self
+            .partitioned_state
+            .iter()
+            .zip(self.partitioned.iter_mut())
+        {
+            batches.append(&mut pbatches);
+        }
+        Ok(Box::pin(MemoryStream::try_new(
+            batches,
+            Arc::clone(&self.schema),
+            None,
+        )?))
+    }
 }
 
 #[derive(bon::Builder, Clone)]
@@ -345,7 +361,13 @@ impl<Inner: PartitionBuffer + Send + 'static> LazyPartitionBuffer
         }
     }
 
-    async fn make_source(&mut self, sink: Self::Sink) -> Result<Self::Source> {
+    async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
+        let delegated = |s: &PartState| *s == PartState::Delegated;
+        if sink.partitioned_state.iter().any(delegated) {
+            sink.force_partition().await?;
+            assert!(sink.unpartitioned.is_empty());
+        }
+
         Ok(AdaptiveSource {
             schema: sink.schema,
             unpartitioned: sink.unpartitioned,

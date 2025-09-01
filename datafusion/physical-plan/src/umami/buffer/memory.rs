@@ -9,7 +9,7 @@ use datafusion_execution::SendableRecordBatchStream;
 use crate::{
     memory::MemoryStream,
     repartition::Partitioner,
-    umami::buffer::{LazyPartitionBuffer, PartitionedSource},
+    umami::buffer::{LazyPartitionBuffer, LazyPartitionedSource, PartitionedSource},
     utils::RowExpr,
 };
 
@@ -79,7 +79,7 @@ impl MemorySource {
     }
 }
 
-impl super::LazyPartitionedSource for MemorySource {
+impl LazyPartitionedSource for MemorySource {
     type PartitionedSource = Self;
 
     async fn unpartitioned(&mut self) -> Result<SendableRecordBatchStream> {
@@ -87,8 +87,7 @@ impl super::LazyPartitionedSource for MemorySource {
             std::mem::take(&mut self.unpartitioned),
             Arc::clone(&self.schema),
             None,
-        )
-        .expect("Failed to create memory stream");
+        )?;
 
         Ok(Box::pin(memory))
     }
@@ -96,6 +95,16 @@ impl super::LazyPartitionedSource for MemorySource {
     fn into_partitioned(self) -> Self {
         assert!(self.unpartitioned.is_empty());
         self
+    }
+
+    async fn all_in_mem(&mut self) -> Result<SendableRecordBatchStream> {
+        let mut batches = std::mem::take(&mut self.unpartitioned);
+        for mut part in self.partitioned.iter_mut() {
+            batches.append(&mut part);
+        }
+
+        let memory = MemoryStream::try_new(batches, Arc::clone(&self.schema), None)?;
+        Ok(Box::pin(memory))
     }
 }
 

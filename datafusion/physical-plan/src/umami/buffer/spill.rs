@@ -114,4 +114,8 @@ impl super::LazyPartitionedSource for SpillSource {
     fn into_partitioned(self) -> Self::PartitionedSource {
         super::empty::EmptySource::new(self.schema, 0)
     }
+
+    async fn all_in_mem(&mut self) -> Result<SendableRecordBatchStream> {
+        self.unpartitioned().await
+    }
 }

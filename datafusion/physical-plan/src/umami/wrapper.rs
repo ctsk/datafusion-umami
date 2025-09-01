@@ -160,22 +160,34 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
     ) -> Result<()> {
         let mut sink = Buffer::make_sink(&mut self.buffer, stream.schema(), expr)?;
         Self::buffer(stream, &mut sink).await?;
-        let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
-        Self::assemble_and_produce(
-            &mut self,
-            Box::new([source.unpartitioned().await?]),
-            output,
-        )
-        .await?;
+        let report = Buffer::probe_sink(&self.buffer, &sink);
 
-        if self.buffer.partition_count() > 0 {
-            let mut source = source.into_partitioned();
-            for partition in 0..self.buffer.partition_count() {
-                let stream = source.stream_partition(PartitionIdx(partition)).await?;
+        if report.parts_oom.is_empty() {
+            let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
+            Self::assemble_and_produce(
+                &mut self,
+                Box::new([source.all_in_mem().await?]),
+                output,
+            )
+            .await
+        } else {
+            sink.force_partition().await?;
+            let mut source = Buffer::make_source(&mut self.buffer, sink)
+                .await?
+                .into_partitioned();
+
+            for partition in report.parts_in_mem {
+                let stream = source.stream_partition(partition).await?;
                 Self::assemble_and_produce(&mut self, Box::new([stream]), output).await?;
             }
+
+            for partition in report.parts_oom {
+                let stream = source.stream_partition(partition).await?;
+                Self::assemble_and_produce(&mut self, Box::new([stream]), output).await?;
+            }
+
+            Ok(())
         }
-        Ok(())
     }
 
     async fn run_binary(
@@ -186,71 +198,54 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         right: SendableRecordBatchStream,
         right_expr: RowExpr,
     ) -> Result<()> {
-        assert!(self.buffer.partition_count() == 0);
-
         let mut left_sink =
             Buffer::make_sink(&mut self.buffer, left.schema(), left_expr)?;
         Self::buffer(left, &mut left_sink).await?;
-        let probe = Buffer::probe_sink(&mut self.buffer, &left_sink);
+        let report = Buffer::probe_sink(&mut self.buffer, &left_sink);
 
-        let all_in_mem = probe.parts_oom.is_empty();
-        if all_in_mem {
+        if report.parts_oom.is_empty() {
             let mut left_source =
                 Buffer::make_source(&mut self.buffer, left_sink).await?;
-            let unpart_left = left_source.unpartitioned().await?;
-            let mut left_source = left_source.into_partitioned();
-            let part_left = left_source.stream_partitions(&probe.parts_in_mem).await?;
-
-            let left_stream =
-                ChainedStream::new(left_source.schema(), vec![unpart_left, part_left]);
-
-            return Self::assemble_and_produce(
-                &mut self,
-                Box::new([Box::pin(left_stream), right]),
-                output,
-            )
-            .await;
-        }
-
-        left_sink.force_partition().await?;
-        let (right_stream, airlock) = Buffer::make_filtered_stream(
-            &mut self.buffer,
-            &left_sink,
-            right,
-            right_expr,
-        )?;
-
-        let mut left_source = Buffer::make_source(&mut self.buffer, left_sink)
-            .await?
-            .into_partitioned();
-
-        let left_stream = left_source.stream_partitions(&probe.parts_in_mem).await?;
-
-        Self::assemble_and_produce(
-            &mut self,
-            Box::new([left_stream, right_stream]),
-            output,
-        )
-        .await?;
-
-        let right_sink = airlock.get();
-        let mut right_source = Buffer::make_source(&mut self.buffer, right_sink)
-            .await?
-            .into_partitioned();
-
-        for part_idx in probe.parts_oom {
-            let left_stream = left_source.stream_partition(part_idx).await?;
-            let right_stream = right_source.stream_partition(part_idx).await?;
 
             Self::assemble_and_produce(
                 &mut self,
-                Box::new([left_stream, right_stream]),
+                Box::new([left_source.all_in_mem().await?, right]),
                 output,
             )
-            .await?;
-        }
+            .await
+        } else {
+            left_sink.force_partition().await?;
 
-        Ok(())
+            let (right_stream, airlock) = Buffer::make_filtered_stream(
+                &mut self.buffer,
+                &left_sink,
+                right,
+                right_expr,
+            )?;
+
+            let mut left_source = Buffer::make_source(&mut self.buffer, left_sink)
+                .await?
+                .into_partitioned();
+
+            let left_stream = left_source.stream_partitions(&report.parts_in_mem).await?;
+
+            let provider = Box::new([left_stream, right_stream]);
+            Self::assemble_and_produce(&mut self, provider, output).await?;
+
+            let right_sink = airlock.get();
+            let mut right_source = Buffer::make_source(&mut self.buffer, right_sink)
+                .await?
+                .into_partitioned();
+
+            for part_idx in report.parts_oom {
+                let left_stream = left_source.stream_partition(part_idx).await?;
+                let right_stream = right_source.stream_partition(part_idx).await?;
+                let provider = Box::new([left_stream, right_stream]);
+                Self::assemble_and_produce(&mut self, provider, output).await?;
+            }
+
+            Ok(())
+        }
     }
 }
 

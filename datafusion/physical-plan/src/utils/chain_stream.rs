@@ -18,6 +18,10 @@ impl ChainedStream {
     pub fn new(schema: SchemaRef, inner: Vec<SendableRecordBatchStream>) -> Self {
         Self { schema, inner }
     }
+
+    pub fn stream(self) -> SendableRecordBatchStream {
+        Box::pin(self) as _
+    }
 }
 
 impl RecordBatchStream for ChainedStream {

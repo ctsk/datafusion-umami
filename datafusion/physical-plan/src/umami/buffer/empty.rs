@@ -50,4 +50,8 @@ impl LazyPartitionedSource for EmptySource {
     fn into_partitioned(self) -> Self::PartitionedSource {
         self
     }
+
+    async fn all_in_mem(&mut self) -> Result<SendableRecordBatchStream> {
+        Ok(Box::pin(EmptyRecordBatchStream::new(self.schema())))
+    }
 }

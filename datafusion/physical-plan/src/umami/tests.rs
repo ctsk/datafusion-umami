@@ -153,7 +153,8 @@ async fn test_adaptive_buffer() -> Result<()> {
                 partition_start: 100,
                 delegate_start: 200,
             };
-            let inner = IoUringSpillBuffer::new(_ctx.runtime_env(), false, false, 4);
+            let inner =
+                IoUringSpillBuffer::new(_ctx.runtime_env(), false, false, false, 4);
             AdaptiveBuffer::builder()
                 .num_partitions(4)
                 .sink_config(config)

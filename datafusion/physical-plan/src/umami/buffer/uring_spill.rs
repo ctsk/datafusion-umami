@@ -20,7 +20,8 @@ pub struct IoUringSink {
 pub struct IoUringSpillBuffer {
     runtime: Arc<RuntimeEnv>,
     recycle: bool,
-    direct_io: bool,
+    direct_io_reader: bool,
+    direct_io_writer: bool,
     partition_count: usize,
 }
 
@@ -30,13 +31,15 @@ impl IoUringSpillBuffer {
     pub fn new(
         runtime: Arc<RuntimeEnv>,
         recycle: bool,
-        direct_io: bool,
+        direct_io_reader: bool,
+        direct_io_writer: bool,
         partition_count: usize,
     ) -> Self {
         Self {
             runtime,
             recycle,
-            direct_io,
+            direct_io_reader,
+            direct_io_writer,
             partition_count,
         }
     }
@@ -89,6 +92,7 @@ impl PartitionBuffer for IoUringSpillBuffer {
             file.path().to_owned(),
             Arc::clone(&schema),
             self.partition_count(),
+            self.direct_io_writer,
         );
         Ok(Self::Sink {
             file,
@@ -105,7 +109,7 @@ impl PartitionBuffer for IoUringSpillBuffer {
             schema: sink.schema,
             reader,
             recycle: self.recycle,
-            direct_io: self.direct_io,
+            direct_io: self.direct_io_reader,
             partition_count: self.partition_count,
         };
         Ok(source)

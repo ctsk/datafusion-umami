@@ -32,7 +32,7 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn new(path: PathBuf, schema: SchemaRef, parts: usize) -> Self {
+    pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, direct_io: bool) -> Self {
         let (tx, rx) = mpsc::channel(1);
         let path_ = path.clone();
         let worker = tokio::task::spawn_blocking(move || {
@@ -43,7 +43,7 @@ impl Writer {
                 path_,
                 parts,
             )
-            .launch(rx)
+            .launch(rx, direct_io)
         });
 
         Self {
@@ -235,14 +235,16 @@ impl PinnedWriter {
     fn launch(
         mut self,
         mut receiver: mpsc::Receiver<Message>,
+        direct_io: bool,
     ) -> Result<AlignedPartitionedIPC> {
         let uring = IoUringAsync::new(self.depth as u32).unwrap();
         let uring = Rc::new(uring);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(&self.path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true);
+        if direct_io {
+            opts.custom_flags(libc::O_DIRECT);
+        }
+        let file = opts.open(&self.path)?;
 
         // Create a new current_thread runtime that submits all outstanding submission queue
         // entries as soon as the executor goes idle.
