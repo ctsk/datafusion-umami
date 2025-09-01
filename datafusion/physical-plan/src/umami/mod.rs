@@ -33,19 +33,15 @@ pub fn apply(
     partition: usize,
     context: Arc<TaskContext>,
 ) -> Result<SendableRecordBatchStream> {
-    let buffer = IoUringSpillBuffer::new(
-        context.runtime_env(),
-        context.session_config().options().x.recycle,
-        context.session_config().options().x.direct_io_reader,
-        context.session_config().options().x.direct_io_writer,
-        16,
-    );
+    let opts = &context.session_config().options().x;
+    let tps = context.session_config().target_partitions() as u64;
+    let buffer = IoUringSpillBuffer::new(context.runtime_env(), opts);
     let buffer = AdaptiveBuffer::builder()
-        .num_partitions(16)
+        .num_partitions(opts.part_count)
         .delegate(buffer)
         .sink_config(StaticHybridSinkConfig {
-            partition_start: 1 << 24,
-            delegate_start: 5 << 24,
+            partition_start: opts.partition_start as u64 / tps,
+            delegate_start: opts.spill_start as u64 / tps,
         })
         .build();
     Ok(MaterializeWrapper::new(factory, input, partition, context, buffer).stream())

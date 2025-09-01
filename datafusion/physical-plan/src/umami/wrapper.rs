@@ -6,13 +6,10 @@ use std::{
 use crate::{
     stream::RecordBatchStreamAdapter,
     umami::{
-        buffer::{
-            LazyPartitionBuffer, LazyPartitionedSource, PartitionIdx, PartitionedSource,
-            Sink,
-        },
+        buffer::{LazyPartitionBuffer, LazyPartitionedSource, PartitionedSource, Sink},
         BasicStreamProvider,
     },
-    utils::{ChainedStream, RowExpr},
+    utils::RowExpr,
 };
 use arrow::array::RecordBatch;
 use datafusion_common::Result;

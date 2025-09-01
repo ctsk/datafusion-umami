@@ -36,6 +36,10 @@ impl Partitioner {
     }
 
     pub fn partition(&mut self, batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
+        if self.histogram.len() == 1 {
+            return Ok(batches.to_owned());
+        }
+
         scatter_partition(
             &self.key,
             batches,

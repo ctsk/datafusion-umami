@@ -909,9 +909,27 @@ config_namespace! {
         pub uring_depth_writer: usize, default = 16
         /// Minimum write size (in bytes) size of the OOM writer
         pub write_buffer_size: usize, default = 64 * (1 << 10)
-        /// Should a hybrid join be used? (else: grace join)
-        pub hybrid_join: bool, default = true
+        /// How fine should we adaptively partition?
+        pub part_count: usize, default = 16
+        /// When should partitioning start?
+        pub partition_start: usize, transform = parse_size, default = 1 << 31
+        /// When should spilling start?
+        pub spill_start: usize, transform = parse_size, default = 1 << 32
     }
+}
+
+fn parse_size(raw: &str) -> String {
+    let raw_bytes = raw.as_bytes();
+    let (factor, rem) = match raw_bytes[raw_bytes.len() - 1] {
+        b'G' | b'g' => (1usize << 30, &raw_bytes[..raw_bytes.len() - 1]),
+        b'M' | b'm' => (1usize << 20, &raw_bytes[..raw_bytes.len() - 1]),
+        b'K' | b'k' => (1usize << 10, &raw_bytes[..raw_bytes.len() - 1]),
+        c if c.is_ascii_digit() => (1usize, raw_bytes),
+        _ => panic!("size could not be parsed"),
+    };
+    let str = std::str::from_utf8(rem).expect("Not UTF-8");
+    let parsed = str.parse::<usize>().expect("Not a num") * factor;
+    format!("{}", parsed)
 }
 
 impl<'a> TryInto<arrow::util::display::FormatOptions<'a>> for &'a FormatOptions {

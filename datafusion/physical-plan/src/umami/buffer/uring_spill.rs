@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
-use datafusion_common::Result;
+use datafusion_common::{config::ExperimentalOptions, Result};
 use datafusion_execution::{
     disk_manager::RefCountedTempFile, runtime_env::RuntimeEnv, SendableRecordBatchStream,
 };
@@ -28,19 +28,13 @@ pub struct IoUringSpillBuffer {
 impl IoUringSpillBuffer {
     pub const NAME: &str = "UMAMI_URING_SPILL";
 
-    pub fn new(
-        runtime: Arc<RuntimeEnv>,
-        recycle: bool,
-        direct_io_reader: bool,
-        direct_io_writer: bool,
-        partition_count: usize,
-    ) -> Self {
+    pub fn new(runtime: Arc<RuntimeEnv>, x: &ExperimentalOptions) -> Self {
         Self {
             runtime,
-            recycle,
-            direct_io_reader,
-            direct_io_writer,
-            partition_count,
+            recycle: x.recycle,
+            direct_io_reader: x.direct_io_reader,
+            direct_io_writer: x.direct_io_writer,
+            partition_count: x.part_count,
         }
     }
 }
