@@ -915,6 +915,8 @@ config_namespace! {
         pub partition_start: usize, transform = parse_size, default = 1 << 31
         /// When should spilling start?
         pub spill_start: usize, transform = parse_size, default = 1 << 32
+        /// Hard disable the materialization mechanism
+        pub hard_disable: bool, default = false
     }
 }
 

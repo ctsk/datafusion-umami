@@ -10,6 +10,7 @@ mod tests;
 mod wrapper;
 
 use datafusion_common::Result;
+use std::panic;
 use std::sync::Arc;
 
 pub use buffer::AsyncSpillBuffer;
@@ -34,6 +35,9 @@ pub fn apply(
     context: Arc<TaskContext>,
 ) -> Result<SendableRecordBatchStream> {
     let opts = &context.session_config().options().x;
+    if opts.hard_disable {
+        return execute_direct(input, factory, partition, context);
+    }
     let tps = context.session_config().target_partitions() as u64;
     let buffer = IoUringSpillBuffer::new(context.runtime_env(), opts);
     let buffer = AdaptiveBuffer::builder()
@@ -45,4 +49,30 @@ pub fn apply(
         })
         .build();
     Ok(MaterializeWrapper::new(factory, input, partition, context, buffer).stream())
+}
+
+fn execute_direct(
+    input: InputKind,
+    mut factory: Box<dyn StreamFactory + Send>,
+    partition: usize,
+    context: Arc<TaskContext>,
+) -> Result<SendableRecordBatchStream> {
+    match input {
+        InputKind::Unary { input, expr: _ } => {
+            factory.make(&mut BasicStreamProvider::new([input]), partition, &context)
+        }
+        InputKind::Binary {
+            left,
+            left_expr: _,
+            right,
+            right_expr: _,
+        } => factory.make(
+            &mut BasicStreamProvider::new([left, right]),
+            partition,
+            &context,
+        ),
+        InputKind::Placeholder => {
+            panic!("Placeholder input not supported")
+        }
+    }
 }
