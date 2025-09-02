@@ -18,7 +18,7 @@ use crate::{
         filter,
         report::BufferReport,
     },
-    utils::RowExpr,
+    utils::{CoalesceStream, RowExpr},
 };
 
 #[derive(Clone)]
@@ -227,14 +227,16 @@ impl<Inner: PartitionedSource + Send> PartitionedSource for AdaptiveSource<Inner
         &mut self,
         index: PartitionIdx,
     ) -> Result<SendableRecordBatchStream> {
-        match self.partitioned_state[index.0] {
-            PartState::Owned => Ok(Box::pin(MemoryStream::try_new(
+        let stream = match self.partitioned_state[index.0] {
+            PartState::Owned => Box::pin(MemoryStream::try_new(
                 std::mem::take(&mut self.partitioned[index.0]),
                 Arc::clone(&self.schema),
                 None,
-            )?)),
-            PartState::Delegated => self.delegate.stream_partition(index).await,
-        }
+            )?),
+            PartState::Delegated => self.delegate.stream_partition(index).await?,
+        };
+
+        Ok(CoalesceStream::new(stream, 896).stream())
     }
 
     fn partition_sequence(&self) -> impl Iterator<Item = usize> {

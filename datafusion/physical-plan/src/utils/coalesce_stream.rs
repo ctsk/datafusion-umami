@@ -14,7 +14,7 @@ pub struct CoalesceStream {
 }
 
 impl CoalesceStream {
-    fn new(input: SendableRecordBatchStream, threshold: usize) -> Self {
+    pub fn new(input: SendableRecordBatchStream, threshold: usize) -> Self {
         Self {
             input,
             threshold,
