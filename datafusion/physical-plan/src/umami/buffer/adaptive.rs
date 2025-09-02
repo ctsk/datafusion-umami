@@ -102,7 +102,7 @@ impl<Inner> AdaptiveSink<Inner> {
     }
 
     fn should_evict(&self) -> bool {
-        self.unpartitioned_size + self.partitioned_total > self.config.delegate_start
+        self.partitioned_total > self.config.delegate_start
     }
 
     fn pick_eviction(&self) -> Option<usize> {
