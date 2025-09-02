@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use crate::umami::io::{
     aligned_ipc::{AlignedPartitionedIPC, BatchBlocks, Block, Loc},
     pool::{LocalPage, LocalPool},
+    uring::WriteOpts,
 };
 
 pub struct Writer {
@@ -32,18 +33,12 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, direct_io: bool) -> Self {
+    pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, opts: WriteOpts) -> Self {
         let (tx, rx) = mpsc::channel(1);
         let path_ = path.clone();
         let worker = tokio::task::spawn_blocking(move || {
-            PinnedWriter::new(
-                schema,
-                super::IO_URING_DEPTH,
-                Default::default(),
-                path_,
-                parts,
-            )
-            .launch(rx, direct_io)
+            PinnedWriter::new(schema, opts.ring_depth, Default::default(), path_, parts)
+                .launch(rx, opts)
         });
 
         Self {
@@ -235,13 +230,13 @@ impl PinnedWriter {
     fn launch(
         mut self,
         mut receiver: mpsc::Receiver<Message>,
-        direct_io: bool,
+        wopts: WriteOpts,
     ) -> Result<AlignedPartitionedIPC> {
         let uring = IoUringAsync::new(self.depth as u32).unwrap();
         let uring = Rc::new(uring);
         let mut opts = std::fs::OpenOptions::new();
         opts.create(true).write(true);
-        if direct_io {
+        if wopts.direct_io {
             opts.custom_flags(libc::O_DIRECT);
         }
         let file = opts.open(&self.path)?;
@@ -288,7 +283,7 @@ impl PinnedWriter {
                                 state_per_p[part].push(dicts, batch)?;
 
                                 if state_per_p[part].buffered_size()
-                                    >= super::WRITE_LOWER_BOUND
+                                    >= wopts.write_lower_bound
                                 {
                                     let permit =
                                         limiter.clone().acquire_owned().await.unwrap();

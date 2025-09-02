@@ -2,7 +2,13 @@ use datafusion_common::{record_batch, Result};
 use futures::StreamExt;
 use tempfile::NamedTempFile;
 
-use crate::{joins::test_utils::compare_batches, umami::io::AsyncBatchWriter};
+use crate::{
+    joins::test_utils::compare_batches,
+    umami::io::{
+        uring::{ReadOpts, WriteOpts},
+        AsyncBatchWriter,
+    },
+};
 
 #[tokio::test]
 async fn test_uring_writer() -> Result<()> {
@@ -12,8 +18,12 @@ async fn test_uring_writer() -> Result<()> {
         ("name", Utf8, vec!["foo"; 42])
     )?;
 
-    let mut writer =
-        super::uring::Writer::new(tmppath.path().into(), data.schema(), 4, true);
+    let mut writer = super::uring::Writer::new(
+        tmppath.path().into(),
+        data.schema(),
+        4,
+        WriteOpts::default(),
+    );
     writer.write(data.clone(), 2).await?;
     writer.write(data.clone(), 1).await?;
     writer.write(data.clone(), 2).await?;
@@ -24,7 +34,7 @@ async fn test_uring_writer() -> Result<()> {
     let mut reader = super::uring::Reader::new(oom_data);
     let mut read_batches = vec![];
     for part in 0..4 {
-        let mut stream = reader.launch(part, true, false);
+        let mut stream = reader.launch(ReadOpts::default(), part);
         while let Some(batch) = stream.next().await {
             read_batches.push(batch?);
         }

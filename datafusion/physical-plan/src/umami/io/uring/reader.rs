@@ -25,6 +25,7 @@ use crate::{
     umami::io::{
         aligned_ipc::{AlignedPartitionedIPC, BatchBlocks, Loc},
         pool::{self, AllocPool, SendablePool},
+        uring::ReadOpts,
     },
 };
 
@@ -43,12 +44,7 @@ impl Reader {
         }
     }
 
-    pub fn launch(
-        &mut self,
-        part: usize,
-        recycle: bool,
-        direct_io: bool,
-    ) -> SendableRecordBatchStream {
+    pub fn launch(&mut self, opts: ReadOpts, part: usize) -> SendableRecordBatchStream {
         let (locs, bbss) = self.blocks_per_p[part]
             .take()
             .expect("Whoa! Partition was read multiple times");
@@ -57,19 +53,19 @@ impl Reader {
         let path = self.path.clone();
         let builder = RecordBatchReceiverStreamBuilder::new(
             Arc::clone(&self.schema),
-            super::IO_URING_DEPTH,
+            opts.readahead,
         );
         let sender = builder.tx();
 
         std::thread::spawn(move || {
-            if recycle {
+            if opts.recycle {
                 PinnedReader {
                     schema,
                     path,
                     offsets: locs,
                     batches: Rc::new(bbss),
-                    depth: super::IO_URING_DEPTH as u32,
-                    direct_io,
+                    depth: opts.ring_depth as u32,
+                    direct_io: opts.direct_io,
                     pool: Arc::new(SendablePool::new()),
                 }
                 .launch(sender)
@@ -79,8 +75,8 @@ impl Reader {
                     path,
                     offsets: locs,
                     batches: Rc::new(bbss),
-                    depth: super::IO_URING_DEPTH as u32,
-                    direct_io,
+                    depth: opts.ring_depth as u32,
+                    direct_io: opts.direct_io,
                     pool: AllocPool::default(),
                 }
                 .launch(sender)

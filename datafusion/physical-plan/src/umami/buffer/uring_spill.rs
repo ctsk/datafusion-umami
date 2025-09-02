@@ -8,7 +8,11 @@ use datafusion_execution::{
 
 use crate::umami::{
     buffer::{PartitionBuffer, PartitionedSource},
-    io::{self, AsyncBatchWriter},
+    io::{
+        self,
+        uring::{ReadOpts, WriteOpts},
+        AsyncBatchWriter,
+    },
 };
 
 pub struct IoUringSink {
@@ -19,9 +23,8 @@ pub struct IoUringSink {
 
 pub struct IoUringSpillBuffer {
     runtime: Arc<RuntimeEnv>,
-    recycle: bool,
-    direct_io_reader: bool,
-    direct_io_writer: bool,
+    ropts: ReadOpts,
+    wopts: WriteOpts,
     partition_count: usize,
 }
 
@@ -31,9 +34,8 @@ impl IoUringSpillBuffer {
     pub fn new(runtime: Arc<RuntimeEnv>, x: &ExperimentalOptions) -> Self {
         Self {
             runtime,
-            recycle: x.recycle,
-            direct_io_reader: x.direct_io_reader,
-            direct_io_writer: x.direct_io_writer,
+            ropts: ReadOpts::from_config(x),
+            wopts: WriteOpts::from_config(x),
             partition_count: x.part_count,
         }
     }
@@ -54,9 +56,8 @@ pub struct IoUringSource {
     file: RefCountedTempFile,
     schema: SchemaRef,
     reader: io::uring::Reader,
-    recycle: bool,
-    direct_io: bool,
     partition_count: usize,
+    opts: ReadOpts,
 }
 
 impl PartitionedSource for IoUringSource {
@@ -64,7 +65,7 @@ impl PartitionedSource for IoUringSource {
         &mut self,
         index: super::PartitionIdx,
     ) -> Result<SendableRecordBatchStream> {
-        Ok(self.reader.launch(index.0, self.recycle, self.direct_io))
+        Ok(self.reader.launch(self.opts.clone(), index.0))
     }
 
     fn partition_count(&self) -> usize {
@@ -86,7 +87,7 @@ impl PartitionBuffer for IoUringSpillBuffer {
             file.path().to_owned(),
             Arc::clone(&schema),
             self.partition_count(),
-            self.direct_io_writer,
+            self.wopts.clone(),
         );
         Ok(Self::Sink {
             file,
@@ -102,8 +103,7 @@ impl PartitionBuffer for IoUringSpillBuffer {
             file: sink.file,
             schema: sink.schema,
             reader,
-            recycle: self.recycle,
-            direct_io: self.direct_io_reader,
+            opts: self.ropts.clone(),
             partition_count: self.partition_count,
         };
         Ok(source)
