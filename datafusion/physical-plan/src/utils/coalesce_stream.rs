@@ -66,7 +66,11 @@ impl Stream for CoalesceStream {
                 }
                 Some(Err(e)) => return Poll::Ready(Some(Err(e))),
                 None => {
-                    return Poll::Ready(Some(self.concat_buffered()));
+                    if self.buffered.is_empty() {
+                        return Poll::Ready(None);
+                    } else {
+                        return Poll::Ready(Some(self.concat_buffered()));
+                    }
                 }
             }
         }
