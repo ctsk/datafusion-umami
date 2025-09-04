@@ -210,6 +210,28 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
                 output,
             )
             .await
+        } else if report.parts_in_mem.is_empty() {
+            left_sink.force_partition().await?;
+            let mut left_source = Buffer::make_source(&mut self.buffer, left_sink)
+                .await?
+                .into_partitioned();
+
+            let mut right_sink =
+                Buffer::make_sink(&mut self.buffer, right.schema(), right_expr)?;
+            Self::buffer(right, &mut right_sink).await?;
+            right_sink.force_partition().await?;
+            let mut right_source = Buffer::make_source(&mut self.buffer, right_sink)
+                .await?
+                .into_partitioned();
+
+            for part_idx in report.parts_oom {
+                let left_stream = left_source.stream_partition(part_idx).await?;
+                let right_stream = right_source.stream_partition(part_idx).await?;
+                let provider = Box::new([left_stream, right_stream]);
+                Self::assemble_and_produce(&mut self, provider, output).await?;
+            }
+
+            Ok(())
         } else {
             left_sink.force_partition().await?;
 
