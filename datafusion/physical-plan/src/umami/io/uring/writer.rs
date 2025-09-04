@@ -29,14 +29,14 @@ use crate::umami::io::{
 pub struct Writer {
     path: PathBuf,
     sender: mpsc::Sender<Message>,
-    worker: Option<tokio::task::JoinHandle<Result<AlignedPartitionedIPC>>>,
+    worker: Option<std::thread::JoinHandle<Result<AlignedPartitionedIPC>>>,
 }
 
 impl Writer {
     pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, opts: WriteOpts) -> Self {
         let (tx, rx) = mpsc::channel(1);
         let path_ = path.clone();
-        let worker = tokio::task::spawn_blocking(move || {
+        let worker = std::thread::spawn(move || {
             PinnedWriter::new(schema, opts.ring_depth, Default::default(), path_, parts)
                 .launch(rx, opts)
         });
@@ -64,7 +64,7 @@ impl super::super::AsyncBatchWriter for Writer {
         let (tx, rx) = oneshot::channel();
         self.sender.send(Message::Finish(tx)).await.unwrap();
         let _ = rx.await;
-        self.worker.take().unwrap().await.unwrap()
+        self.worker.take().unwrap().join().unwrap()
     }
 }
 
