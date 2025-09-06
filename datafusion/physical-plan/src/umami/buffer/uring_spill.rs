@@ -10,7 +10,7 @@ use crate::umami::{
     buffer::{PartitionBuffer, PartitionedSource},
     io::{
         self,
-        uring::{ReadOpts, WriteOpts},
+        uring_async::{ReadOpts, WriteOpts},
         AsyncBatchWriter,
     },
 };
@@ -18,7 +18,7 @@ use crate::umami::{
 pub struct IoUringSink {
     file: RefCountedTempFile,
     schema: SchemaRef,
-    writer: io::uring::Writer,
+    writer: io::uring_async::Writer,
 }
 
 pub struct IoUringSpillBuffer {
@@ -55,7 +55,7 @@ impl super::PartitionedSink for IoUringSink {
 pub struct IoUringSource {
     file: RefCountedTempFile,
     schema: SchemaRef,
-    reader: io::uring::Reader,
+    reader: io::uring_async::Reader,
     partition_count: usize,
     opts: ReadOpts,
 }
@@ -83,7 +83,7 @@ impl PartitionBuffer for IoUringSpillBuffer {
 
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
         let file = self.runtime.disk_manager.create_tmp_file(Self::NAME)?;
-        let writer = io::uring::Writer::new(
+        let writer = io::uring_async::Writer::new(
             file.path().to_owned(),
             Arc::clone(&schema),
             self.partition_count(),
@@ -98,7 +98,7 @@ impl PartitionBuffer for IoUringSpillBuffer {
 
     async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
         let data = sink.writer.finish().await?;
-        let reader = io::uring::Reader::new(data);
+        let reader = io::uring_async::Reader::new(data);
         let source = IoUringSource {
             file: sink.file,
             schema: sink.schema,

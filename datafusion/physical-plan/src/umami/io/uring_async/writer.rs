@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use crate::umami::io::{
     aligned_ipc::{AlignedPartitionedIPC, BatchBlocks, Block, Loc},
     pool::{LocalPage, LocalPool},
-    uring::WriteOpts,
+    uring_async::WriteOpts,
 };
 
 pub struct Writer {
