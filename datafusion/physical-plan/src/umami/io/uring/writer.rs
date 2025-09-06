@@ -34,7 +34,7 @@ pub struct Writer {
 
 impl Writer {
     pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, opts: WriteOpts) -> Self {
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(opts.ring_depth * 2);
         let path_ = path.clone();
         let worker = std::thread::spawn(move || {
             PinnedWriter::new(schema, opts.ring_depth, Default::default(), path_, parts)
