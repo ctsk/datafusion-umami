@@ -7,7 +7,7 @@ mod pool;
 pub mod spill;
 #[cfg(test)]
 mod tests;
-pub mod uring_async;
+pub mod uring;
 
 pub trait BatchWriter {
     type Intermediate: Send;

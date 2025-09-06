@@ -50,6 +50,7 @@ arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 bon = "3.7.0"
 chrono = { workspace = true }
+crossbeam = "0.8.4"
 datafusion-arrow-extra = { workspace = true, default-features = true }
 datafusion-common = { workspace = true, default-features = true }
 datafusion-common-runtime = { workspace = true, default-features = true }

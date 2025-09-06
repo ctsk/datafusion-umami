@@ -10,7 +10,7 @@ use crate::umami::{
     buffer::{PartitionBuffer, PartitionedSource},
     io::{
         self,
-        uring_async::{ReadOpts, WriteOpts},
+        uring::{ReadOpts, WriteOpts},
         AsyncBatchWriter,
     },
 };
@@ -18,13 +18,14 @@ use crate::umami::{
 pub struct IoUringSink {
     file: RefCountedTempFile,
     schema: SchemaRef,
-    writer: io::uring_async::Writer,
+    writer: io::uring::Writer,
 }
 
 pub struct IoUringSpillBuffer {
     runtime: Arc<RuntimeEnv>,
     ropts: ReadOpts,
     wopts: WriteOpts,
+    use_runtime_writer: bool,
     partition_count: usize,
 }
 
@@ -34,6 +35,7 @@ impl IoUringSpillBuffer {
     pub fn new(runtime: Arc<RuntimeEnv>, x: &ExperimentalOptions) -> Self {
         Self {
             runtime,
+            use_runtime_writer: x.use_runtime_writer,
             ropts: ReadOpts::from_config(x),
             wopts: WriteOpts::from_config(x),
             partition_count: x.part_count,
@@ -55,7 +57,7 @@ impl super::PartitionedSink for IoUringSink {
 pub struct IoUringSource {
     file: RefCountedTempFile,
     schema: SchemaRef,
-    reader: io::uring_async::Reader,
+    reader: io::uring::Reader,
     partition_count: usize,
     opts: ReadOpts,
 }
@@ -83,12 +85,22 @@ impl PartitionBuffer for IoUringSpillBuffer {
 
     fn make_sink(&mut self, schema: SchemaRef) -> Result<Self::Sink> {
         let file = self.runtime.disk_manager.create_tmp_file(Self::NAME)?;
-        let writer = io::uring_async::Writer::new(
-            file.path().to_owned(),
-            Arc::clone(&schema),
-            self.partition_count(),
-            self.wopts.clone(),
-        );
+        let writer = if self.use_runtime_writer {
+            io::uring::Writer::new_with_runtime(io::uring::RuntimeWriter::new(
+                file.path().to_owned(),
+                Arc::clone(&schema),
+                self.partition_count(),
+                self.wopts.clone(),
+            ))
+        } else {
+            io::uring::Writer::new_without_runtime(io::uring::RuntimeFreeWriter::new(
+                file.path().to_owned(),
+                Arc::clone(&schema),
+                self.partition_count(),
+                self.wopts.clone(),
+            ))
+        };
+
         Ok(Self::Sink {
             file,
             schema,
@@ -98,7 +110,7 @@ impl PartitionBuffer for IoUringSpillBuffer {
 
     async fn make_source(&mut self, mut sink: Self::Sink) -> Result<Self::Source> {
         let data = sink.writer.finish().await?;
-        let reader = io::uring_async::Reader::new(data);
+        let reader = io::uring::Reader::new(data);
         let source = IoUringSource {
             file: sink.file,
             schema: sink.schema,

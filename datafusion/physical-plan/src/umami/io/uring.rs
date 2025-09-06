@@ -1,17 +1,22 @@
-mod reader;
+mod reader_runtime;
 mod writer;
+mod writer_runtime;
 
 // const IO_URING_DEPTH: usize = 8;
-const DIRECT_IO_ALIGNMENT: usize = 512;
-const BATCH_UPPER_BOUND: usize = 1 << 30;
+pub const DIRECT_IO_ALIGNMENT: usize = 512;
+pub const BATCH_UPPER_BOUND: usize = 1 << 30;
 // const WRITE_LOWER_BOUND: usize = 1 << 20;
 
 use std::rc::Rc;
 
 use datafusion_common::config::ExperimentalOptions;
 use io_uring_async::IoUringAsync;
-pub use reader::Reader;
-pub use writer::Writer;
+
+pub use reader_runtime::Reader;
+pub use writer::Writer as RuntimeFreeWriter;
+pub use writer_runtime::Writer as RuntimeWriter;
+
+use crate::umami::io::AsyncBatchWriter;
 
 struct RefSendWrapper {
     inner: Rc<IoUringAsync>,
@@ -32,9 +37,9 @@ unsafe impl Sync for RefSendWrapper {}
 
 #[derive(Clone)]
 pub struct WriteOpts {
-    direct_io: bool,
-    ring_depth: usize,
-    write_lower_bound: usize,
+    pub direct_io: bool,
+    pub ring_depth: usize,
+    pub write_lower_bound: usize,
 }
 
 impl WriteOpts {
@@ -83,6 +88,43 @@ impl Default for ReadOpts {
             ring_depth: 16,
             readahead: 16,
             recycle: false,
+        }
+    }
+}
+
+pub enum Writer {
+    WithRuntime(RuntimeWriter),
+    WithoutRuntime(RuntimeFreeWriter),
+}
+
+impl Writer {
+    pub fn new_with_runtime(writer: RuntimeWriter) -> Self {
+        Writer::WithRuntime(writer)
+    }
+
+    pub fn new_without_runtime(writer: RuntimeFreeWriter) -> Self {
+        Writer::WithoutRuntime(writer)
+    }
+}
+
+impl AsyncBatchWriter for Writer {
+    type Intermediate = <writer::Writer as AsyncBatchWriter>::Intermediate;
+
+    async fn write(
+        &mut self,
+        batch: arrow::array::RecordBatch,
+        part: usize,
+    ) -> datafusion_common::Result<()> {
+        match self {
+            Writer::WithRuntime(writer) => writer.write(batch, part).await,
+            Writer::WithoutRuntime(writer) => writer.write(batch, part).await,
+        }
+    }
+
+    async fn finish(&mut self) -> datafusion_common::Result<Self::Intermediate> {
+        match self {
+            Writer::WithRuntime(writer) => writer.finish().await,
+            Writer::WithoutRuntime(writer) => writer.finish().await,
         }
     }
 }

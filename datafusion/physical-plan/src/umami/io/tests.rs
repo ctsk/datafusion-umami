@@ -5,7 +5,7 @@ use tempfile::NamedTempFile;
 use crate::{
     joins::test_utils::compare_batches,
     umami::io::{
-        uring_async::{ReadOpts, WriteOpts},
+        uring::{ReadOpts, RuntimeFreeWriter, WriteOpts},
         AsyncBatchWriter,
     },
 };
@@ -18,12 +18,12 @@ async fn test_uring_writer() -> Result<()> {
         ("name", Utf8, vec!["foo"; 42])
     )?;
 
-    let mut writer = super::uring_async::Writer::new(
+    let mut writer = super::uring::Writer::new_without_runtime(RuntimeFreeWriter::new(
         tmppath.path().into(),
         data.schema(),
         4,
         WriteOpts::default(),
-    );
+    ));
     writer.write(data.clone(), 2).await?;
     writer.write(data.clone(), 1).await?;
     writer.write(data.clone(), 2).await?;
@@ -31,7 +31,7 @@ async fn test_uring_writer() -> Result<()> {
 
     eprintln!("{:#?}", oom_data);
 
-    let mut reader = super::uring_async::Reader::new(oom_data);
+    let mut reader = super::uring::Reader::new(oom_data);
     let mut read_batches = vec![];
     for part in 0..4 {
         let mut stream = reader.launch(ReadOpts::default(), part);

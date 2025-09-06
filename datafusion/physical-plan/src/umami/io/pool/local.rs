@@ -1,35 +1,67 @@
-use std::{
-    cell::RefCell,
-    mem::ManuallyDrop,
-    rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{cell::RefCell, mem::ManuallyDrop, rc::Rc};
 
 pub struct LocalPool {
-    buffers: RefCell<Vec<memmap2::MmapMut>>,
+    inner: RefCell<Inner>,
     alloc_size: usize,
-    alloc_count: AtomicU64,
+    limit: Option<usize>,
+}
+
+struct Inner {
+    buffers: Vec<memmap2::MmapMut>,
+    alloc_count: usize,
 }
 
 impl LocalPool {
     pub fn new(alloc_size: usize) -> Self {
         Self {
-            buffers: Default::default(),
+            inner: RefCell::new(Inner {
+                buffers: Default::default(),
+                alloc_count: 0,
+            }),
             alloc_size,
-            alloc_count: AtomicU64::new(0),
+            limit: None,
         }
     }
+
+    pub fn new_with_limit(alloc_size: usize, limit: usize) -> Self {
+        Self {
+            inner: RefCell::new(Inner {
+                buffers: Default::default(),
+                alloc_count: 0,
+            }),
+            alloc_size,
+            limit: Some(limit),
+        }
+    }
+
     pub fn issue_page(self: &Rc<Self>) -> LocalPage {
-        let buffer = match self.buffers.borrow_mut().pop() {
+        let mut inner = self.inner.borrow_mut();
+        let buffer = match inner.buffers.pop() {
             Some(buffer) => buffer,
-            None => self.allocate_new_page(),
+            None => {
+                inner.alloc_count += 1;
+                if let Some(limit) = self.limit {
+                    if inner.alloc_count > limit {
+                        panic!("Exceeded limit of {} pages", limit);
+                    }
+                }
+                self.allocate_new_page()
+            }
         };
 
         LocalPage::new(Rc::clone(&self), buffer)
     }
 
+    pub fn alloc_count(&self) -> usize {
+        self.inner.borrow().alloc_count
+    }
+
+    pub fn can_issue_page(&self) -> bool {
+        let inner = self.inner.borrow();
+        !inner.buffers.is_empty() || inner.alloc_count < self.limit.unwrap_or(usize::MAX)
+    }
+
     fn allocate_new_page(&self) -> memmap2::MmapMut {
-        self.alloc_count.fetch_add(1, Ordering::AcqRel);
         memmap2::MmapMut::map_anon(self.alloc_size)
             .expect("Failed to allocate spill page")
     }
@@ -74,8 +106,9 @@ impl LocalPage {
 
     pub fn return_to_pool(&mut self) {
         self.pool
-            .buffers
+            .inner
             .borrow_mut()
+            .buffers
             .push(self.buffer.take().unwrap());
     }
 }

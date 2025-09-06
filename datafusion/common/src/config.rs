@@ -919,6 +919,8 @@ config_namespace! {
         pub spill_start: usize, transform = parse_size, default = 1 << 32
         /// Hard disable the materialization mechanism
         pub hard_disable: bool, default = false
+        /// Should the io_uring writer use a local tokio runtime?
+        pub use_runtime_writer: bool, default = false
     }
 }
 

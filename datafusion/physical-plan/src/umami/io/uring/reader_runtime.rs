@@ -25,7 +25,7 @@ use crate::{
     umami::io::{
         aligned_ipc::{AlignedPartitionedIPC, BatchBlocks, Loc},
         pool::{self, AllocPool, SendablePool},
-        uring_async::ReadOpts,
+        uring::ReadOpts,
     },
 };
 
