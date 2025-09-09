@@ -9,7 +9,12 @@ use datafusion_execution::SendableRecordBatchStream;
 use crate::{
     memory::MemoryStream,
     repartition::Partitioner,
-    umami::buffer::{LazyPartitionBuffer, LazyPartitionedSource, PartitionedSource},
+    umami::{
+        buffer::{
+            LazyPartitionBuffer, LazyPartitionedSource, PartitionIdx, PartitionedSource,
+        },
+        report::BufferReport,
+    },
     utils::RowExpr,
 };
 
@@ -111,7 +116,7 @@ impl LazyPartitionedSource for MemorySource {
 impl PartitionedSource for MemorySource {
     async fn stream_partition(
         &mut self,
-        index: super::PartitionIdx,
+        index: PartitionIdx,
     ) -> Result<SendableRecordBatchStream> {
         Ok(Box::pin(
             MemoryStream::try_new(
@@ -175,5 +180,14 @@ impl LazyPartitionBuffer for PartitionMemoryBuffer {
 
     fn partition_count(&self) -> usize {
         self.num_partitions
+    }
+
+    fn probe_sink(&self, sink: &Self::Sink) -> BufferReport {
+        let parts_in_mem = (0..sink.buffers.len()).map(|i| PartitionIdx(i)).collect();
+        BufferReport {
+            unpart_batches: 0,
+            parts_in_mem,
+            parts_oom: vec![],
+        }
     }
 }

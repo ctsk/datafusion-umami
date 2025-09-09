@@ -79,24 +79,6 @@ impl<Inner> AdaptiveSink<Inner> {
         }
     }
 
-    pub fn new_random(
-        config: StaticHybridSinkConfig,
-        expr: RowExpr,
-        num_partitions: usize,
-        inner: Inner,
-        schema: SchemaRef,
-    ) -> Self {
-        Self::new(
-            config,
-            expr,
-            num_partitions,
-            RandomState::new(),
-            inner,
-            schema,
-            None,
-        )
-    }
-
     fn should_partition(&self) -> bool {
         self.unpartitioned_size > self.config.partition_start
     }
@@ -222,6 +204,7 @@ pub struct AdaptiveSource<Inner> {
     partitioned: Vec<Vec<RecordBatch>>,
     delegate: Inner,
 }
+
 impl<Inner: PartitionedSource + Send> PartitionedSource for AdaptiveSource<Inner> {
     async fn stream_partition(
         &mut self,
@@ -256,6 +239,7 @@ impl<Inner: PartitionedSource + Send> PartitionedSource for AdaptiveSource<Inner
         Arc::clone(&self.schema)
     }
 }
+
 impl<Inner: PartitionedSource + Send> super::LazyPartitionedSource
     for AdaptiveSource<Inner>
 {
@@ -290,11 +274,27 @@ impl<Inner: PartitionedSource + Send> super::LazyPartitionedSource
     }
 }
 
-#[derive(bon::Builder, Clone)]
+#[derive(Clone)]
 pub struct AdaptiveBuffer<Inner: PartitionBuffer + Send> {
     sink_config: StaticHybridSinkConfig,
     num_partitions: usize,
     delegate: Inner,
+    seed: RandomState,
+}
+
+impl<Inner: PartitionBuffer + Send> AdaptiveBuffer<Inner> {
+    pub fn new(
+        sink_config: StaticHybridSinkConfig,
+        num_partitions: usize,
+        delegate: Inner,
+    ) -> Self {
+        Self {
+            sink_config,
+            num_partitions,
+            delegate,
+            seed: RandomState::new(),
+        }
+    }
 }
 
 impl<Inner: PartitionBuffer + Send + 'static> LazyPartitionBuffer
@@ -306,12 +306,14 @@ impl<Inner: PartitionBuffer + Send + 'static> LazyPartitionBuffer
     fn make_sink(&mut self, schema: SchemaRef, key: RowExpr) -> Result<Self::Sink> {
         assert_eq!(self.partition_count(), self.delegate.partition_count());
         let inner = self.delegate.make_sink(Arc::clone(&schema))?;
-        Ok(Self::Sink::new_random(
+        Ok(Self::Sink::new(
             self.sink_config.clone(),
             key,
             self.num_partitions,
+            self.seed.clone(),
             inner,
             schema,
+            None,
         ))
     }
 

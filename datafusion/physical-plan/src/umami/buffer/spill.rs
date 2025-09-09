@@ -10,9 +10,12 @@ use datafusion_execution::{
 use crate::{
     metrics::{ExecutionPlanMetricsSet, SpillMetrics},
     spill::in_progress_spill_file::InProgressSpillFile,
-    umami::buffer::SinglePartAdapter,
+    umami::{
+        buffer::{PartitionIdx, SinglePartAdapter},
+        report::BufferReport,
+    },
     utils::RowExpr,
-    EmptyRecordBatchStream, SpillManager,
+    SpillManager,
 };
 
 use super::LazyPartitionBuffer;
@@ -62,7 +65,15 @@ impl LazyPartitionBuffer for SpillBuffer {
     }
 
     fn partition_count(&self) -> usize {
-        0
+        1
+    }
+
+    fn probe_sink(&self, _sink: &Self::Sink) -> BufferReport {
+        BufferReport {
+            unpart_batches: 0,
+            parts_in_mem: vec![],
+            parts_oom: vec![PartitionIdx(0)],
+        }
     }
 }
 
@@ -103,16 +114,11 @@ impl super::LazyPartitionedSource for SpillSource {
     type PartitionedSource = super::empty::EmptySource;
 
     async fn unpartitioned(&mut self) -> Result<SendableRecordBatchStream> {
-        match self.spill_file.take() {
-            Some(file) => self.manager.read_spill_as_stream(file),
-            None => Ok(Box::pin(EmptyRecordBatchStream::new(Arc::clone(
-                &self.schema,
-            )))),
-        }
+        todo!()
     }
 
     fn into_partitioned(self) -> Self::PartitionedSource {
-        super::empty::EmptySource::new(self.schema, 0)
+        todo!()
     }
 
     async fn all_in_mem(&mut self) -> Result<SendableRecordBatchStream> {

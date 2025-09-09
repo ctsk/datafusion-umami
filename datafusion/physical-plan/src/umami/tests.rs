@@ -155,11 +155,7 @@ async fn test_adaptive_buffer() -> Result<()> {
             };
             let opts = &_ctx.session_config().options().x;
             let inner = IoUringSpillBuffer::new(_ctx.runtime_env(), opts);
-            AdaptiveBuffer::builder()
-                .num_partitions(4)
-                .sink_config(config)
-                .delegate(inner)
-                .build()
+            AdaptiveBuffer::new(config, opts.part_count, inner)
         }
     }
     test_buffer_generic::<BC>().await?;
