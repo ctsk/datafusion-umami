@@ -39,6 +39,13 @@ impl<O: OffsetSizeTrait> GroupValuesByes<O> {
             num_groups: 0,
         }
     }
+
+    pub fn new_with_estimate(output_type: OutputType, estimate: usize) -> Self {
+        Self {
+            map: ArrowBytesMap::with_capacity(output_type, estimate),
+            num_groups: 0,
+        }
+    }
 }
 
 impl<O: OffsetSizeTrait> GroupValues for GroupValuesByes<O> {

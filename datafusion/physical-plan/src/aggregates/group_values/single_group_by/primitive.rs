@@ -108,6 +108,17 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
             random_state: crate::aggregates::AGGREGATION_HASH_SEED,
         }
     }
+
+    pub fn new_with_estimate(data_type: DataType, estimate: usize) -> Self {
+        assert!(PrimitiveArray::<T>::is_compatible(&data_type));
+        Self {
+            data_type,
+            map: HashTable::with_capacity(estimate),
+            values: Vec::with_capacity(estimate),
+            null_group: None,
+            random_state: crate::aggregates::AGGREGATION_HASH_SEED,
+        }
+    }
 }
 
 impl<T: ArrowPrimitiveType> GroupValues for GroupValuesPrimitive<T>

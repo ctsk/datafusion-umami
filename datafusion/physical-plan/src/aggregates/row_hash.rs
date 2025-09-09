@@ -23,7 +23,9 @@ use std::vec;
 
 use super::order::GroupOrdering;
 use super::AggregateExec;
-use crate::aggregates::group_values::{new_group_values, GroupValues};
+use crate::aggregates::group_values::{
+    new_group_values, new_group_values_with_estimate, GroupValues,
+};
 use crate::aggregates::order::GroupOrderingFull;
 use crate::aggregates::{
     create_schema, evaluate_group_by, evaluate_many, evaluate_optional, AggregateMode,
@@ -569,11 +571,19 @@ impl StreamFactory for GroupedHashAggregateStreamFactory {
         context: &TaskContext,
     ) -> Result<SendableRecordBatchStream> {
         let input_stream = inputs.get(0);
+        let input_estimate = inputs.estimate(0);
 
         let group_ordering = GroupOrdering::try_new(&self.input_order_mode)?;
 
-        let group_values =
-            new_group_values(Arc::clone(&self.group_schema), &group_ordering)?;
+        let group_values = if let Some(estimate) = input_estimate {
+            new_group_values_with_estimate(
+                Arc::clone(&self.group_schema),
+                &group_ordering,
+                estimate,
+            )?
+        } else {
+            new_group_values(Arc::clone(&self.group_schema), &group_ordering)?
+        };
 
         let accumulators = self
             .aggregate_exprs

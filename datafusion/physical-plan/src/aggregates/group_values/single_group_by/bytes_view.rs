@@ -40,6 +40,13 @@ impl GroupValuesBytesView {
             num_groups: 0,
         }
     }
+
+    pub fn new_with_estimate(output_type: OutputType, estimate: usize) -> Self {
+        Self {
+            map: ArrowBytesViewMap::with_capacity(output_type, estimate),
+            num_groups: 0,
+        }
+    }
 }
 
 impl GroupValues for GroupValuesBytesView {

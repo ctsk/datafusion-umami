@@ -279,6 +279,22 @@ impl<const STREAMING: bool> GroupValuesColumn<STREAMING> {
         })
     }
 
+    /// Create a new instance of GroupValuesColumn if supported for the specified schema
+    pub fn try_new_with_capacity(schema: SchemaRef, capacity: usize) -> Result<Self> {
+        let map = HashTable::with_capacity(capacity);
+        Ok(Self {
+            schema,
+            map,
+            group_index_lists: Vec::new(),
+            emit_group_index_list_buffer: Vec::new(),
+            vectorized_operation_buffers: VectorizedOperationBuffers::default(),
+            map_size: 0,
+            group_values: vec![],
+            hashes_buffer: Default::default(),
+            random_state: crate::aggregates::AGGREGATION_HASH_SEED,
+        })
+    }
+
     // ========================================================================
     // Scalarized intern
     // ========================================================================

@@ -156,6 +156,18 @@ where
         }
     }
 
+    pub fn with_capacity(output_type: OutputType, capacity: usize) -> Self {
+        Self {
+            output_type,
+            map: hashbrown::hash_table::HashTable::with_capacity(capacity),
+            map_size: 0,
+            builder: GenericByteViewBuilder::new(),
+            random_state: RandomState::new(),
+            hashes_buffer: vec![],
+            null: None,
+        }
+    }
+
     /// Return the contents of this map and replace it with a new empty map with
     /// the same output type
     pub fn take(&mut self) -> Self {

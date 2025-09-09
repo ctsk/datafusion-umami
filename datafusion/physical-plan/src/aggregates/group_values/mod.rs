@@ -119,7 +119,7 @@ pub trait GroupValues: Send {
 ///   - If group by single column, and type of this column has
 ///     the specific [`GroupValues`] implementation, such implementation
 ///     will be chosen.
-///   
+///
 ///   - If group by multiple columns, and all column types have the specific
 ///     `GroupColumn` implementations, `GroupValuesColumn` will be chosen.
 ///
@@ -203,5 +203,110 @@ pub fn new_group_values(
         }
     } else {
         Ok(Box::new(GroupValuesRows::try_new(schema)?))
+    }
+}
+
+pub fn new_group_values_with_estimate(
+    schema: SchemaRef,
+    group_ordering: &GroupOrdering,
+    estimate: usize,
+) -> Result<Box<dyn GroupValues>> {
+    if schema.fields.len() == 1 {
+        let d = schema.fields[0].data_type();
+
+        macro_rules! downcast_helper {
+            ($t:ty, $d:ident) => {
+                return Ok(Box::new(GroupValuesPrimitive::<$t>::new_with_estimate(
+                    $d.clone(),
+                    estimate,
+                )))
+            };
+        }
+
+        downcast_primitive! {
+            d => (downcast_helper, d),
+            _ => {}
+        }
+
+        match d {
+            DataType::Date32 => {
+                downcast_helper!(Date32Type, d);
+            }
+            DataType::Date64 => {
+                downcast_helper!(Date64Type, d);
+            }
+            DataType::Time32(t) => match t {
+                TimeUnit::Second => downcast_helper!(Time32SecondType, d),
+                TimeUnit::Millisecond => downcast_helper!(Time32MillisecondType, d),
+                _ => {}
+            },
+            DataType::Time64(t) => match t {
+                TimeUnit::Microsecond => downcast_helper!(Time64MicrosecondType, d),
+                TimeUnit::Nanosecond => downcast_helper!(Time64NanosecondType, d),
+                _ => {}
+            },
+            DataType::Timestamp(t, _tz) => match t {
+                TimeUnit::Second => downcast_helper!(TimestampSecondType, d),
+                TimeUnit::Millisecond => downcast_helper!(TimestampMillisecondType, d),
+                TimeUnit::Microsecond => downcast_helper!(TimestampMicrosecondType, d),
+                TimeUnit::Nanosecond => downcast_helper!(TimestampNanosecondType, d),
+            },
+            DataType::Decimal128(_, _) => {
+                downcast_helper!(Decimal128Type, d);
+            }
+            DataType::Utf8 => {
+                return Ok(Box::new(GroupValuesByes::<i32>::new_with_estimate(
+                    OutputType::Utf8,
+                    estimate,
+                )));
+            }
+            DataType::LargeUtf8 => {
+                return Ok(Box::new(GroupValuesByes::<i64>::new_with_estimate(
+                    OutputType::Utf8,
+                    estimate,
+                )));
+            }
+            DataType::Utf8View => {
+                return Ok(Box::new(GroupValuesBytesView::new_with_estimate(
+                    OutputType::Utf8View,
+                    estimate,
+                )));
+            }
+            DataType::Binary => {
+                return Ok(Box::new(GroupValuesByes::<i32>::new_with_estimate(
+                    OutputType::Binary,
+                    estimate,
+                )));
+            }
+            DataType::LargeBinary => {
+                return Ok(Box::new(GroupValuesByes::<i64>::new_with_estimate(
+                    OutputType::Binary,
+                    estimate,
+                )));
+            }
+            DataType::BinaryView => {
+                return Ok(Box::new(GroupValuesBytesView::new_with_estimate(
+                    OutputType::BinaryView,
+                    estimate,
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    if multi_group_by::supported_schema(schema.as_ref()) {
+        if matches!(group_ordering, GroupOrdering::None) {
+            Ok(Box::new(GroupValuesColumn::<false>::try_new_with_capacity(
+                schema, estimate,
+            )?))
+        } else {
+            Ok(Box::new(GroupValuesColumn::<true>::try_new_with_capacity(
+                schema, estimate,
+            )?))
+        }
+    } else {
+        Ok(Box::new(GroupValuesRows::try_new_with_capacity(
+            schema, estimate,
+        )?))
     }
 }
