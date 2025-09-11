@@ -232,7 +232,9 @@ fn compact_view_column<T: ByteViewType>(
     let actual_buffer_size: usize =
         array.data_buffers().iter().map(|buf| buf.capacity()).sum();
 
-    if actual_buffer_size as f32 > ideal_buffer_size as f32 * threshold {
+    if threshold >= 0.95
+        || actual_buffer_size as f32 >= ideal_buffer_size as f32 * threshold
+    {
         // todo: request APIs from arrow-rs to obtain a mutable downcasted array
         // ... so we can reuse the data buffers of the column here.
         // until then: out of place :(
