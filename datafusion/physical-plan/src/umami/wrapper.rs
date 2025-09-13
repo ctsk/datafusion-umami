@@ -18,6 +18,14 @@ use futures::{stream::BoxStream, Stream, StreamExt};
 
 use super::StreamFactory;
 
+pub struct WrapperConfig {}
+
+impl Default for WrapperConfig {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
 /// MaterializeWrapper loads the input data into the buffer.
 pub struct MaterializeWrapper<Buffer> {
     factory: Box<dyn StreamFactory + Send>,
@@ -25,6 +33,7 @@ pub struct MaterializeWrapper<Buffer> {
     partition: usize,
     ctx: Arc<TaskContext>,
     buffer: Buffer,
+    config: WrapperConfig,
 }
 
 pub enum InputKind {
@@ -78,6 +87,25 @@ impl<Buffer> MaterializeWrapper<Buffer> {
             partition,
             ctx,
             buffer,
+            config: WrapperConfig::default(),
+        }
+    }
+
+    pub fn new_with_config(
+        factory: Box<dyn StreamFactory + Send>,
+        input: InputKind,
+        partition: usize,
+        ctx: Arc<TaskContext>,
+        buffer: Buffer,
+        config: WrapperConfig,
+    ) -> Self {
+        Self {
+            factory,
+            input,
+            partition,
+            ctx,
+            buffer,
+            config,
         }
     }
 }
@@ -159,16 +187,40 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         Self::buffer(stream, &mut sink).await?;
         let report = Buffer::probe_sink(&self.buffer, &sink);
 
+        //
+        // Strategy:
+        //    - if any partition was spilled
+        //       - must finish partitioning all data
+        //         - Opt 1: Combine the in-memory partitions <--- does not make sense (?)
+        //         - Opt 2: Process in-memory partitions separately
+        //    - if no partition was spilled
+        //       - Opt 1: Finish partitioning, process in-memory partitions separately
+        //       - Opt 2: Do not finish partitioning, make a single combined aggregation
+        //
         if report.parts_oom.is_empty() {
             let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
-            Self::assemble_and_produce(
-                &mut self,
-                Box::new([source.all_in_mem().await?]),
-                output,
-            )
-            .await
+
+            if report.unpart_batches == 0 {
+                let mut source = source.into_partitioned();
+                for partition in report.parts_in_mem {
+                    let stream = source.stream_partition(partition).await?;
+                    Self::assemble_and_produce(&mut self, Box::new([stream]), output)
+                        .await?;
+                }
+                Ok(())
+            } else {
+                Self::assemble_and_produce(
+                    &mut self,
+                    Box::new([source.all_in_mem().await?]),
+                    output,
+                )
+                .await
+            }
         } else {
             sink.force_partition().await?;
+            let report = Buffer::probe_sink(&self.buffer, &sink);
+            assert!(report.unpart_batches == 0);
+
             let mut source = Buffer::make_source(&mut self.buffer, sink)
                 .await?
                 .into_partitioned();

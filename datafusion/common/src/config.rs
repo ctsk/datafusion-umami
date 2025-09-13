@@ -921,6 +921,8 @@ config_namespace! {
         pub hard_disable: bool, default = false
         /// Should the io_uring writer use a local tokio runtime?
         pub use_runtime_writer: bool, default = false
+        /// Should we incrementally partition the unpartitioned batches?
+        pub incremental_partition: bool, default = false
     }
 }
 

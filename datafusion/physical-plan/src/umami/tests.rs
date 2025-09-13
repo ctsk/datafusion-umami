@@ -152,6 +152,7 @@ async fn test_adaptive_buffer() -> Result<()> {
             let config = StaticHybridSinkConfig {
                 partition_start: 100,
                 delegate_start: 200,
+                incremental: false,
             };
             let opts = &_ctx.session_config().options().x;
             let inner = IoUringSpillBuffer::new(_ctx.runtime_env(), opts);

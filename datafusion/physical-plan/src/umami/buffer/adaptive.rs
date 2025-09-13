@@ -25,6 +25,7 @@ use crate::{
 pub struct StaticHybridSinkConfig {
     pub partition_start: u64,
     pub delegate_start: u64,
+    pub incremental: bool,
 }
 
 enum SinkState {
@@ -87,6 +88,7 @@ impl<Inner> AdaptiveSink<Inner> {
         self.partitioned_total > self.config.delegate_start
     }
 
+    // We always evict the largest partition
     fn pick_eviction(&self) -> Option<usize> {
         self.partitioned_sizes
             .iter()
@@ -153,8 +155,19 @@ impl<Inner: PartitionedSink + Send> Sink for AdaptiveSink<Inner> {
             SinkState::Partition => {
                 self.unpartitioned_size += utils::batch_size_shared(&batch) as u64;
                 self.unpartitioned.push(batch);
-                // Partition `target_chunk_size` batches at once to avoid producing too small output batches
-                let target_chunk_size = self.num_partitions().min(32);
+                // Strategy 1: Partition `target_chunk_size` batches at once to avoid producing too small output batches
+                // Stragegy 2: Partition 2 batches:
+                //                 => with every incoming batch, we reduce the number of unpartitioned batches by 1
+                //                 => when the number of unpartitioned batches is 0, there were more partitioned than unpartitioned batches
+                // Strategy 3: Partition 1 batches:
+                //                 => unpartitioned batches will only be partitioned when spill occurs
+                let target_chunk_size = if self.config.incremental {
+                    //self.num_partitions().min(32)
+                    2
+                } else {
+                    1
+                };
+
                 let start = self.unpartitioned.len().saturating_sub(target_chunk_size);
                 let range = start..self.unpartitioned.len();
                 self.partition_and_push(range.clone()).await?;

@@ -45,6 +45,7 @@ pub fn apply(
     let sink_config = StaticHybridSinkConfig {
         partition_start: opts.partition_start as u64 / tps,
         delegate_start: opts.spill_start as u64 / tps,
+        incremental: opts.incremental_partition,
     };
     let buffer = AdaptiveBuffer::new(sink_config, opts.part_count, buffer);
     Ok(MaterializeWrapper::new(factory, input, partition, context, buffer).stream())

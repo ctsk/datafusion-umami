@@ -96,10 +96,12 @@ impl<Sink: PartitionedSink + Send + 'static> PartingFilter<Sink> {
             let parts = self.partitioner.partition(&[batch?])?;
             for (i, (delay, batch)) in self.mask.iter().zip(parts.into_iter()).enumerate()
             {
-                if *delay {
-                    sink.push_to_part(batch, i).await?;
-                } else {
-                    passthrough.push(batch);
+                if batch.num_rows() > 0 {
+                    if *delay {
+                        sink.push_to_part(batch, i).await?;
+                    } else {
+                        passthrough.push(batch);
+                    }
                 }
             }
             let batch = concat_batches(&self.input.schema(), &passthrough)?;
