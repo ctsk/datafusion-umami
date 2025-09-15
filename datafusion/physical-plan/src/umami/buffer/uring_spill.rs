@@ -49,7 +49,7 @@ impl super::PartitionedSink for IoUringSink {
         batch: arrow::array::RecordBatch,
         part: usize,
     ) -> Result<()> {
-        let batch = crate::common::compact(1.0, batch);
+        let batch = crate::common::compact(0.95, batch);
         self.writer.write(batch, part).await
     }
 }
