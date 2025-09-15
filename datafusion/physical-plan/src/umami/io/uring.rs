@@ -2,10 +2,8 @@ mod reader_runtime;
 mod writer;
 mod writer_runtime;
 
-// const IO_URING_DEPTH: usize = 8;
-pub const DIRECT_IO_ALIGNMENT: usize = 512;
-pub const BATCH_UPPER_BOUND: usize = 1 << 30;
-// const WRITE_LOWER_BOUND: usize = 1 << 20;
+pub const DIRECT_IO_ALIGNMENT: usize = 4096;
+pub const BATCH_UPPER_BOUND: usize = 1 << 25;
 
 use std::rc::Rc;
 
@@ -57,7 +55,7 @@ impl Default for WriteOpts {
         Self {
             direct_io: false,
             ring_depth: 16,
-            write_lower_bound: 1 << 20,
+            write_lower_bound: 0,
         }
     }
 }
