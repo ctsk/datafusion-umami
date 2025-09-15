@@ -49,6 +49,7 @@ pub use crate::metrics::Metric;
 pub use crate::ordering::InputOrderMode;
 pub use crate::stream::EmptyRecordBatchStream;
 pub use crate::topk::TopK;
+pub use crate::umami::BufferExec;
 pub use crate::visitor::{accept, visit_execution_plan, ExecutionPlanVisitor};
 pub use crate::work_table::WorkTable;
 pub use spill::spill_manager::SpillManager;
