@@ -71,6 +71,7 @@ impl LazyPartitionBuffer for SpillBuffer {
     fn probe_sink(&self, _sink: &Self::Sink) -> BufferReport {
         BufferReport {
             unpart_batches: 0,
+            did_partition: true,
             parts_in_mem: vec![],
             parts_oom: vec![PartitionIdx(0)],
         }

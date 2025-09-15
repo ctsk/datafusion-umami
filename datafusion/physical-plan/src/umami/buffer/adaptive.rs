@@ -38,6 +38,7 @@ pub struct AdaptiveSink<Inner> {
     partitioner: Partitioner,
     state: SinkState,
     unpartitioned_size: u64,
+    unpartitioned_over_limit: u64,
     unpartitioned: Vec<RecordBatch>,
     partitioned_total: u64,
     partitioned_sizes: Vec<u64>,
@@ -70,6 +71,7 @@ impl<Inner> AdaptiveSink<Inner> {
             partitioner: Partitioner::new(expr, random_state, num_partitions),
             state,
             unpartitioned_size: 0,
+            unpartitioned_over_limit: 0,
             unpartitioned: vec![],
             partitioned_total: 0,
             partitioned_sizes: vec![0; num_partitions],
@@ -154,6 +156,7 @@ impl<Inner: PartitionedSink + Send> Sink for AdaptiveSink<Inner> {
             }
             SinkState::Partition => {
                 self.unpartitioned_size += utils::batch_size_shared(&batch) as u64;
+                self.unpartitioned_over_limit += 1;
                 self.unpartitioned.push(batch);
                 // Strategy 1: Partition `target_chunk_size` batches at once to avoid producing too small output batches
                 // Stragegy 2: Partition 2 batches:
@@ -161,12 +164,20 @@ impl<Inner: PartitionedSink + Send> Sink for AdaptiveSink<Inner> {
                 //                 => when the number of unpartitioned batches is 0, there were more partitioned than unpartitioned batches
                 // Strategy 3: Partition 1 batches:
                 //                 => unpartitioned batches will only be partitioned when spill occurs
-                let target_chunk_size = if self.config.incremental {
-                    //self.num_partitions().min(32)
-                    2
+                let target_chunk_size = self.num_partitions().min(16);
+                let perform_partition_limit = if self.config.incremental {
+                    target_chunk_size / 2
                 } else {
-                    1
+                    target_chunk_size
                 };
+
+                if self.unpartitioned_over_limit as usize >= perform_partition_limit
+                    && self.unpartitioned.len() >= target_chunk_size
+                {
+                    self.unpartitioned_over_limit = 0;
+                } else {
+                    return Ok(());
+                }
 
                 let start = self.unpartitioned.len().saturating_sub(target_chunk_size);
                 let range = start..self.unpartitioned.len();
@@ -267,6 +278,7 @@ impl<Inner: PartitionedSource + Send> super::LazyPartitionedSource
     }
 
     fn into_partitioned(self) -> Self::PartitionedSource {
+        assert!(self.unpartitioned.is_empty());
         self
     }
 
@@ -367,12 +379,14 @@ impl<Inner: PartitionBuffer + Send + 'static> LazyPartitionBuffer
             .filter(owned)
             .map(PartitionIdx)
             .collect();
-        let parts_oom = (0..sink.partitioned_state.len())
+        let parts_oom: Vec<_> = (0..sink.partitioned_state.len())
             .filter(delegated)
             .map(PartitionIdx)
             .collect();
+        let did_partition = !parts_oom.is_empty() || sink.partitioned_total > 0;
         BufferReport {
             unpart_batches: sink.unpartitioned.len(),
+            did_partition,
             parts_in_mem,
             parts_oom,
         }

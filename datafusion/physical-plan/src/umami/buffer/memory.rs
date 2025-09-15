@@ -186,6 +186,7 @@ impl LazyPartitionBuffer for PartitionMemoryBuffer {
         let parts_in_mem = (0..sink.buffers.len()).map(|i| PartitionIdx(i)).collect();
         BufferReport {
             unpart_batches: 0,
+            did_partition: true,
             parts_in_mem,
             parts_oom: vec![],
         }

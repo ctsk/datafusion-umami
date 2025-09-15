@@ -198,9 +198,9 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         //       - Opt 2: Do not finish partitioning, make a single combined aggregation
         //
         if report.parts_oom.is_empty() {
-            let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
-
-            if report.unpart_batches == 0 {
+            if report.did_partition && report.unpart_batches <= 16 {
+                sink.force_partition().await?;
+                let source = Buffer::make_source(&mut self.buffer, sink).await?;
                 let mut source = source.into_partitioned();
                 for partition in report.parts_in_mem {
                     let stream = source.stream_partition(partition).await?;
@@ -209,6 +209,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
                 }
                 Ok(())
             } else {
+                let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
                 Self::assemble_and_produce(
                     &mut self,
                     Box::new([source.all_in_mem().await?]),
