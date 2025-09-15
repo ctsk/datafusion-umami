@@ -32,7 +32,7 @@ pub struct Writer {
 
 impl Writer {
     pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, opts: WriteOpts) -> Self {
-        let (tx, rx) = crossbeam::channel::bounded(opts.ring_depth * 2);
+        let (tx, rx) = crossbeam::channel::bounded((parts * 2).max(16)); // Have enough slots for 2 rounds of partitioning + sinking
         let path_ = path.clone();
         let worker = std::thread::spawn(move || {
             PinnedWriter::new(schema, opts.ring_depth, Default::default(), path_, parts)
