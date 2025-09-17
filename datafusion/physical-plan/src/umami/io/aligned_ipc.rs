@@ -15,7 +15,7 @@ pub struct AlignedPartitionedIPC {
     pub blocks: Vec<(Vec<Loc>, Vec<BatchBlocks>)>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Loc {
     pub batch_blocks_offset: usize,
     pub file_offset: usize,
@@ -43,7 +43,7 @@ impl Block {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BatchBlocks {
     pub dicts: Vec<Block>,
     pub batch: Block,

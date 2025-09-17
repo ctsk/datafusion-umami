@@ -11,13 +11,15 @@ use std::{
 use arrow::{
     array::RecordBatch,
     ipc::writer::{
-        write_message, DictionaryTracker, EncodedData, IpcDataGenerator, IpcWriteOptions,
+        write_message_by_ref, DictionaryTracker, EncodedData, EncoderState,
+        IpcDataGenerator, IpcWriteOptions,
     },
 };
 use arrow_schema::{ArrowError, SchemaRef};
 use datafusion_common::{DataFusionError, Result};
 use io_uring::{opcode, types};
 use io_uring_async::IoUringAsync;
+use once_cell::unsync::OnceCell;
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use crate::umami::io::{
@@ -27,24 +29,57 @@ use crate::umami::io::{
 };
 
 pub struct Writer {
+    init: Option<Init>,
+    once_inner: OnceCell<Inner>,
+}
+
+struct Init {
+    opts: WriteOpts,
+    schema: SchemaRef,
     path: PathBuf,
+    partitions: usize,
+}
+
+struct Inner {
     sender: mpsc::Sender<Message>,
     worker: Option<std::thread::JoinHandle<Result<AlignedPartitionedIPC>>>,
 }
 
 impl Writer {
-    pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, opts: WriteOpts) -> Self {
-        let (tx, rx) = mpsc::channel((parts * 2).max(16));
-        let path_ = path.clone();
-        let worker = std::thread::spawn(move || {
-            PinnedWriter::new(schema, opts.ring_depth, Default::default(), path_, parts)
-                .launch(rx, opts)
+    fn inner(&mut self) -> &mut Inner {
+        self.once_inner.get_or_init(|| {
+            let init = self.init.take().unwrap();
+            let (tx, rx) = mpsc::channel((init.partitions * 2).max(16));
+
+            let worker = std::thread::spawn(move || {
+                PinnedWriter::new(
+                    init.schema,
+                    init.opts.ring_depth,
+                    Default::default(),
+                    init.path,
+                    init.partitions,
+                )
+                .launch(rx, init.opts)
+            });
+
+            Inner {
+                sender: tx,
+                worker: Some(worker),
+            }
         });
 
+        self.once_inner.get_mut().unwrap()
+    }
+
+    pub fn new(path: PathBuf, schema: SchemaRef, parts: usize, opts: WriteOpts) -> Self {
         Self {
-            path,
-            sender: tx,
-            worker: Some(worker),
+            init: Some(Init {
+                schema,
+                opts,
+                path,
+                partitions: parts,
+            }),
+            once_inner: OnceCell::new(),
         }
     }
 }
@@ -53,7 +88,8 @@ impl super::super::AsyncBatchWriter for Writer {
     type Intermediate = AlignedPartitionedIPC;
 
     async fn write(&mut self, batch: RecordBatch, partition: usize) -> Result<()> {
-        self.sender
+        self.inner()
+            .sender
             .send(Message::Sink(batch, partition))
             .await
             .unwrap();
@@ -61,10 +97,22 @@ impl super::super::AsyncBatchWriter for Writer {
     }
 
     async fn finish(&mut self) -> Result<Self::Intermediate> {
-        let (tx, rx) = oneshot::channel();
-        self.sender.send(Message::Finish(tx)).await.unwrap();
-        let _ = rx.await;
-        self.worker.take().unwrap().join().unwrap()
+        match OnceCell::get_mut(&mut self.once_inner) {
+            Some(inner) => {
+                let (tx, rx) = oneshot::channel();
+                inner.sender.send(Message::Finish(tx)).await.unwrap();
+                let _ = rx.await;
+                inner.worker.take().unwrap().join().unwrap()
+            }
+            None => {
+                let init = self.init.take().unwrap();
+                Ok(AlignedPartitionedIPC {
+                    schema: init.schema,
+                    path: init.path,
+                    blocks: vec![(vec![], vec![]); init.partitions],
+                })
+            }
+        }
     }
 }
 
@@ -122,13 +170,15 @@ impl PartWriteState {
 impl PartWriteState {
     fn push_data(
         page: &mut LocalPage,
-        encoded: EncodedData,
+        ipc_message: &[u8],
+        arrow_data: &[u8],
         write_options: &IpcWriteOptions,
     ) -> Result<Block> {
         let offset = page.len();
         let ptr_before = page.as_vec().as_ptr() as usize;
         let dst: &mut Vec<u8> = page.as_mut_vec();
-        let (meta, data) = write_message(dst, encoded, &write_options)?;
+        let (meta, data) =
+            write_message_by_ref(dst, ipc_message, arrow_data, &write_options)?;
         let ptr_after = page.as_vec().as_ptr() as usize;
 
         assert!(
@@ -143,16 +193,26 @@ impl PartWriteState {
         })
     }
 
-    fn push(&mut self, dicts: Vec<EncodedData>, batch: EncodedData) -> Result<()> {
+    fn push(&mut self, dicts: &[EncodedData], batch: &EncoderState) -> Result<()> {
         if self.page.is_none() {
             self.page = Some(self.pool.issue_page());
         }
         let page_ref = self.page.as_mut().unwrap();
         let mut dict_blocks = Vec::new();
         for dict in dicts {
-            dict_blocks.push(Self::push_data(page_ref, dict, &self.write_options)?);
+            dict_blocks.push(Self::push_data(
+                page_ref,
+                &dict.ipc_message,
+                &dict.arrow_data,
+                &self.write_options,
+            )?);
         }
-        let batch = Self::push_data(page_ref, batch, &self.write_options)?;
+        let batch = Self::push_data(
+            page_ref,
+            batch.ipc_message().unwrap(),
+            batch.arrow_data().unwrap(),
+            &self.write_options,
+        )?;
         direct_io_pad_vec(page_ref.as_mut_vec(), 0);
         let bb = BatchBlocks {
             dicts: dict_blocks,
@@ -222,9 +282,14 @@ impl PinnedWriter {
     fn encode_batch(
         &mut self,
         batch: &RecordBatch,
-    ) -> Result<(Vec<EncodedData>, EncodedData), ArrowError> {
-        self.data_gen
-            .encoded_batch(batch, &mut self.dict_tracker, &self.write_options)
+        state: &mut EncoderState,
+    ) -> Result<Vec<EncodedData>, ArrowError> {
+        self.data_gen.encoded_batch_to(
+            batch,
+            &mut self.dict_tracker,
+            &self.write_options,
+            state,
+        )
     }
 
     fn launch(
@@ -270,6 +335,7 @@ impl PinnedWriter {
                         })
                         .collect();
                     let abort = Rc::new(AtomicBool::new(false));
+                    let mut encoder_state = EncoderState::new();
                     while let Some(msg) = receiver.recv().await {
                         if abort.load(Ordering::Relaxed) {
                             return Err(DataFusionError::Execution(String::from(
@@ -279,8 +345,9 @@ impl PinnedWriter {
 
                         match msg {
                             Message::Sink(record_batch, part) => {
-                                let (dicts, batch) = self.encode_batch(&record_batch)?;
-                                state_per_p[part].push(dicts, batch)?;
+                                let dicts =
+                                    self.encode_batch(&record_batch, &mut encoder_state)?;
+                                state_per_p[part].push(&dicts, &encoder_state)?;
 
                                 if state_per_p[part].buffered_size()
                                     >= wopts.write_lower_bound
