@@ -91,9 +91,30 @@ impl<Sink: PartitionedSink + Send + 'static> PartingFilter<Sink> {
     async fn run(&mut self, output: &mut Output) -> Result<()> {
         let mut sink = self.sink.take().unwrap();
 
+        let chunk_size = self.mask.len().min(16);
+        let mut batcher = Vec::new();
         let mut passthrough = Vec::new();
         while let Some(batch) = self.input.next().await {
-            let parts = self.partitioner.partition(&[batch?])?;
+            batcher.push(batch?);
+            if batcher.len() >= chunk_size {
+                let parts = self.partitioner.partition(&batcher)?;
+                for (i, (delay, batch)) in
+                    self.mask.iter().zip(parts.into_iter()).enumerate()
+                {
+                    if batch.num_rows() > 0 {
+                        if *delay {
+                            sink.push_to_part(batch, i).await?;
+                        } else {
+                            output.yield_(Ok(batch)).await;
+                        }
+                    }
+                }
+                batcher.clear();
+            }
+        }
+
+        if !batcher.is_empty() {
+            let parts = self.partitioner.partition(&batcher)?;
             for (i, (delay, batch)) in self.mask.iter().zip(parts.into_iter()).enumerate()
             {
                 if batch.num_rows() > 0 {
@@ -104,9 +125,27 @@ impl<Sink: PartitionedSink + Send + 'static> PartingFilter<Sink> {
                     }
                 }
             }
-            let batch = concat_batches(&self.input.schema(), &passthrough)?;
-            output.yield_(Ok(batch)).await;
-            passthrough.clear();
+
+            // Iterate over passthrough, concatenate batches so that all batches that are emitted have at num_rows() > 1024;
+            // yield those batches.
+            let mut to_concat = Vec::new();
+            let mut to_concat_rows = 0;
+            while !passthrough.is_empty() {
+                let batch = passthrough.pop().unwrap();
+                to_concat_rows += batch.num_rows();
+                to_concat.push(batch);
+                if to_concat_rows >= 1024 {
+                    let batch = concat_batches(&self.input.schema(), &to_concat)?;
+                    to_concat.clear();
+                    to_concat_rows = 0;
+                    output.yield_(Ok(batch)).await;
+                }
+            }
+            if !to_concat.is_empty() {
+                let batch = concat_batches(&self.input.schema(), &to_concat)?;
+                to_concat.clear();
+                output.yield_(Ok(batch)).await;
+            }
         }
 
         self.airlock.put(sink);
