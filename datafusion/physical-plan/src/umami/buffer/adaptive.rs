@@ -18,7 +18,7 @@ use crate::{
         filter,
         report::BufferReport,
     },
-    utils::{CoalesceStream, RowExpr},
+    utils::{ChainedStream, CoalesceStream, RowExpr},
 };
 
 #[derive(Clone)]
@@ -40,10 +40,12 @@ pub struct AdaptiveSink<Inner> {
     unpartitioned_size: u64,
     unpartitioned_over_limit: u64,
     unpartitioned: Vec<RecordBatch>,
+    unpartitioned_batch_sizes: Vec<u64>,
     partitioned_total: u64,
     partitioned_sizes: Vec<u64>,
     partitioned_state: Vec<PartState>,
-    partitioned: Vec<Vec<RecordBatch>>,
+    partitioned: Vec<(Vec<RecordBatch>, Vec<u64>)>,
+    current_eviction: Option<usize>,
     inner: Inner,
     schema: SchemaRef,
 }
@@ -73,21 +75,23 @@ impl<Inner> AdaptiveSink<Inner> {
             unpartitioned_size: 0,
             unpartitioned_over_limit: 0,
             unpartitioned: vec![],
+            unpartitioned_batch_sizes: vec![],
             partitioned_total: 0,
             partitioned_sizes: vec![0; num_partitions],
             partitioned_state: mask,
-            partitioned: vec![vec![]; num_partitions],
+            partitioned: vec![(vec![], vec![]); num_partitions],
+            current_eviction: None,
             inner,
             schema,
         }
     }
 
     fn should_partition(&self) -> bool {
-        self.unpartitioned_size > self.config.partition_start
+        self.unpartitioned_size > self.config.delegate_start // We just start partition when we have to data to delegate
     }
 
     fn should_evict(&self) -> bool {
-        self.partitioned_total > self.config.delegate_start
+        self.unpartitioned_size + self.partitioned_total > self.config.delegate_start
     }
 
     // We always evict the largest partition
@@ -110,8 +114,11 @@ impl<Inner: PartitionedSink + Send> PartitionedSink for AdaptiveSink<Inner> {
     async fn push_to_part(&mut self, batch: RecordBatch, part: usize) -> Result<()> {
         match self.partitioned_state[part] {
             PartState::Owned => {
-                self.partitioned_sizes[part] += utils::batch_size_shared(&batch) as u64;
-                self.partitioned[part].push(batch);
+                let size = utils::batch_size_shared(&batch) as u64;
+                self.partitioned_sizes[part] += size;
+                self.partitioned[part].0.push(batch);
+                self.partitioned[part].1.push(size);
+                self.partitioned_total += size;
                 Ok(())
             }
             PartState::Delegated => self.inner.push_to_part(batch, part).await,
@@ -125,12 +132,14 @@ impl<Inner: PartitionedSink + Send> AdaptiveSink<Inner> {
 
         for (p, batch) in parts.into_iter().enumerate() {
             if batch.num_rows() > 0 {
+                let batch = crate::common::compact(0.95, batch);
                 match self.partitioned_state[p] {
                     PartState::Owned => {
                         let size = utils::batch_size_shared(&batch) as u64;
                         self.partitioned_sizes[p] += size;
                         self.partitioned_total += size;
-                        self.partitioned[p].push(batch);
+                        self.partitioned[p].0.push(batch);
+                        self.partitioned[p].1.push(size);
                     }
                     PartState::Delegated => {
                         self.inner.push_to_part(batch, p).await?;
@@ -147,58 +156,72 @@ impl<Inner: PartitionedSink + Send> Sink for AdaptiveSink<Inner> {
     async fn push(&mut self, batch: RecordBatch) -> Result<()> {
         match self.state {
             SinkState::Unpartition => {
-                self.unpartitioned_size += utils::batch_size_shared(&batch) as u64;
+                let size = utils::batch_size_shared(&batch) as u64;
+                self.unpartitioned_size += size;
                 self.unpartitioned.push(batch);
+                self.unpartitioned_batch_sizes.push(size);
 
                 if self.should_partition() {
                     self.state = SinkState::Partition;
                 }
             }
             SinkState::Partition => {
-                self.unpartitioned_size += utils::batch_size_shared(&batch) as u64;
-                self.unpartitioned_over_limit += 1;
+                let size = utils::batch_size_shared(&batch) as u64;
+
+                self.unpartitioned_size += size;
                 self.unpartitioned.push(batch);
-                // Strategy 1: Partition `target_chunk_size` batches at once to avoid producing too small output batches
-                // Stragegy 2: Partition 2 batches:
-                //                 => with every incoming batch, we reduce the number of unpartitioned batches by 1
-                //                 => when the number of unpartitioned batches is 0, there were more partitioned than unpartitioned batches
-                // Strategy 3: Partition 1 batches:
-                //                 => unpartitioned batches will only be partitioned when spill occurs
+                self.unpartitioned_batch_sizes.push(size);
+
                 let target_chunk_size = self.num_partitions().min(16);
-                let perform_partition_limit = if self.config.incremental {
-                    target_chunk_size / 2
-                } else {
-                    target_chunk_size
-                };
 
-                if self.unpartitioned_over_limit as usize >= perform_partition_limit
-                    && self.unpartitioned.len() >= target_chunk_size
-                {
-                    self.unpartitioned_over_limit = 0;
-                } else {
-                    return Ok(());
-                }
-
-                let start = self.unpartitioned.len().saturating_sub(target_chunk_size);
-                let range = start..self.unpartitioned.len();
-                self.partition_and_push(range.clone()).await?;
-
-                for batch in self.unpartitioned.drain(range) {
-                    self.unpartitioned_size -= utils::batch_size_shared(&batch) as u64;
-                }
-
-                while self.should_evict() {
-                    let Some(eviction) = self.pick_eviction() else {
-                        panic!("OOM reached with no evictable partition")
-                    };
-
-                    for batch in self.partitioned[eviction].drain(..) {
-                        self.inner.push_to_part(batch, eviction).await?;
+                loop {
+                    loop {
+                        if self.partitioned_total > self.config.delegate_start {
+                            if let Some(eviction) = self.current_eviction {
+                                if !self.partitioned[eviction].0.is_empty() {
+                                    let spill =
+                                        self.partitioned[eviction].0.pop().unwrap();
+                                    let size =
+                                        self.partitioned[eviction].1.pop().unwrap();
+                                    self.partitioned_total -= size;
+                                    self.partitioned_sizes[eviction] -= size;
+                                    self.inner.push_to_part(spill, eviction).await?;
+                                } else {
+                                    self.current_eviction = None;
+                                }
+                            } else {
+                                let Some(victim) = self.pick_eviction() else {
+                                    panic!("No eviction candidate found.")
+                                };
+                                self.partitioned_state[victim] = PartState::Delegated;
+                                self.current_eviction = Some(victim);
+                            }
+                        } else {
+                            break;
+                        }
                     }
 
-                    self.partitioned_total -= self.partitioned_sizes[eviction];
-                    self.partitioned_sizes[eviction] = 0;
-                    self.partitioned_state[eviction] = PartState::Delegated;
+                    if self.partitioned_total + self.unpartitioned_size
+                        > self.config.delegate_start
+                    {
+                        if self.unpartitioned.len() < target_chunk_size {
+                            return Ok(());
+                        } else {
+                            let start = self
+                                .unpartitioned
+                                .len()
+                                .saturating_sub(target_chunk_size);
+                            let range = start..self.unpartitioned.len();
+                            self.partition_and_push(range.clone()).await?;
+                            for _ in range {
+                                let _ = self.unpartitioned.pop();
+                                let size = self.unpartitioned_batch_sizes.pop().unwrap();
+                                self.unpartitioned_size -= size;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -240,7 +263,22 @@ impl<Inner: PartitionedSource + Send> PartitionedSource for AdaptiveSource<Inner
                 Arc::clone(&self.schema),
                 None,
             )?),
-            PartState::Delegated => self.delegate.stream_partition(index).await?,
+            PartState::Delegated => {
+                if self.partitioned[index.0].is_empty() {
+                    self.delegate.stream_partition(index).await?
+                } else {
+                    let mem_stream = Box::pin(MemoryStream::try_new(
+                        std::mem::take(&mut self.partitioned[index.0]),
+                        Arc::clone(&self.schema),
+                        None,
+                    )?);
+
+                    let del_stream = self.delegate.stream_partition(index).await?;
+
+                    ChainedStream::new(del_stream.schema(), vec![del_stream, mem_stream])
+                        .stream()
+                }
+            }
         };
 
         Ok(CoalesceStream::new(stream, 896).stream())
@@ -403,7 +441,7 @@ impl<Inner: PartitionBuffer + Send + 'static> LazyPartitionBuffer
             schema: sink.schema,
             unpartitioned: sink.unpartitioned,
             partitioned_state: sink.partitioned_state,
-            partitioned: sink.partitioned,
+            partitioned: sink.partitioned.into_iter().map(|v| v.0).collect(),
             delegate: self.delegate.make_source(sink.inner).await?,
         })
     }
