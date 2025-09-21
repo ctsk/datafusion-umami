@@ -199,6 +199,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         //
         if report.parts_oom.is_empty() {
             if report.did_partition && report.unpart_batches <= 16 {
+                log::info!("Executing unary: partitioned + in-mem");
                 sink.force_partition().await?;
                 let source = Buffer::make_source(&mut self.buffer, sink).await?;
                 let mut source = source.into_partitioned();
@@ -209,6 +210,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
                 }
                 Ok(())
             } else {
+                log::info!("Executing unary: unified + in-memory");
                 let mut source = Buffer::make_source(&mut self.buffer, sink).await?;
                 Self::assemble_and_produce(
                     &mut self,
@@ -225,6 +227,12 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
             let mut source = Buffer::make_source(&mut self.buffer, sink)
                 .await?
                 .into_partitioned();
+
+            log::info!(
+                "Executing unary: oom: {} spilled, {} in mem",
+                report.parts_oom.len(),
+                report.parts_in_mem.len()
+            );
 
             for partition in report.parts_in_mem {
                 let stream = source.stream_partition(partition).await?;
@@ -254,6 +262,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
         let report = Buffer::probe_sink(&mut self.buffer, &left_sink);
 
         if report.parts_oom.is_empty() {
+            log::info!("Executing binary: unified + in-mem");
             let mut left_source =
                 Buffer::make_source(&mut self.buffer, left_sink).await?;
 
@@ -264,6 +273,7 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
             )
             .await
         } else if report.parts_in_mem.is_empty() {
+            log::info!("Executing grace binary");
             left_sink.force_partition().await?;
             let mut left_source = Buffer::make_source(&mut self.buffer, left_sink)
                 .await?
@@ -286,6 +296,12 @@ impl<Buffer: LazyPartitionBuffer + Send + 'static> MaterializeWrapper<Buffer> {
 
             Ok(())
         } else {
+            log::info!(
+                "Executing hybrid binary: oom: {} spilled, {} in mem",
+                report.parts_oom.len(),
+                report.parts_in_mem.len()
+            );
+
             left_sink.force_partition().await?;
 
             let (right_stream, airlock) = Buffer::make_filtered_stream(
