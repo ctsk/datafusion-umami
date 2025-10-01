@@ -241,12 +241,3 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(tarpaulin_include)",
 ] }
 unused_qualifications = "deny"
-
-[patch.crates-io]
-arrow = { path = "../arrow-rs/arrow" }
-arrow-buffer = { path = "../arrow-rs/arrow-buffer" }
-arrow-ipc = { path = "../arrow-rs/arrow-ipc" }
-arrow-ord = { path = "../arrow-rs/arrow-ord" }
-arrow-schema = { path = "../arrow-rs/arrow-schema" }
-arrow-flight = { path = "../arrow-rs/arrow-flight" }
-parquet = { path = "../arrow-rs/parquet" }
